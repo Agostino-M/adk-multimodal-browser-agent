@@ -1,7 +1,9 @@
 import asyncio
 import json
+from pprint import pprint
 from datetime import datetime
 from dotenv import load_dotenv
+from google.genai import types
 from google.adk.runners import Runner
 from google.adk.agents import LlmAgent
 from google.adk.models.lite_llm import LiteLlm
@@ -85,7 +87,6 @@ root_agent = LlmAgent(
 )
 
 async def main():
-    await browser.init()
 
     session_service = InMemorySessionService()
     runner = Runner(
@@ -108,10 +109,7 @@ async def main():
         }
     ]"""
 
-    structured_tasks = [{"task": "goto https://httpbin.org/forms/post"},{"task": "compile form with 'Agostino' as Customer name"},{"task": "submit form"}]
-
-    from google.genai import types
-    import json
+    structured_tasks = [{"task": "goto https://httpbin.org/forms/post"},{"task": "type 'Mario' as Customer name, '123456789' as telephone"},{"task": "submit form"}]
 
     try:
         with open("agent_log.jsonl", "a") as f:
@@ -128,8 +126,7 @@ async def main():
 
             img_b64 = await browser._take_screenshot()
             dom = await browser._extract_interactive_elements()
-            from pprint import pprint
-            pprint(dom)
+            #pprint(dom)
 
             new_message = types.Content(
                 role="user",
