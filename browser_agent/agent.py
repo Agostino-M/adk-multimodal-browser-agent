@@ -2,9 +2,11 @@ import os
 from dotenv import load_dotenv
 from google.adk.agents import LlmAgent
 from google.adk.models.lite_llm import LiteLlm
+from google.adk.apps.app import App
+from google.adk.plugins.multimodal_tool_results_plugin import MultimodalToolResultsPlugin
 
-from test.browser import BrowserManager
-from test.prompt import prompt_base
+from browser_agent.browser import BrowserManager
+from browser_agent.prompt import prompt_base
 
 load_dotenv()
 
@@ -36,4 +38,10 @@ root_agent = LlmAgent(
     instruction=prompt_base,
     name="web_agent_test",
     description="Navigates the web and performs actions based on user instructions",
+)
+
+app = App(
+    name="browser_agent",
+    root_agent=root_agent,
+    plugins=[MultimodalToolResultsPlugin()],
 )
