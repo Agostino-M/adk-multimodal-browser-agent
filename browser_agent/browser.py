@@ -65,7 +65,6 @@ class BrowserManager:
 
         return int(numbers[0]), int(numbers[1])
 
-
     async def _extract_interactive_elements(self):
         elements = await self.active_page.evaluate("""
         () => {
@@ -86,6 +85,17 @@ class BrowserManager:
         """)
         return elements
 
+    def _sanitize_css_selector(self, selector: str) -> str:
+        selector = selector.strip()
+
+        # escape quotes inside attribute values
+        selector = re.sub(r"(?<=\=)['\"]([^'\"]*)['\"]", lambda m: '"' + m.group(1).replace('"', '\\"') + '"', selector)
+
+        # remove potentially dangerous characters that could break the selector
+        selector = re.sub(r"[^a-zA-Z0-9\[\]=\.\#\*\-_\s\>\+\~]", "", selector)
+
+        return selector
+
     async def get_state(self) -> List[types.Part]:
         """
         Returns the full observable state of the browser.
@@ -102,9 +112,9 @@ class BrowserManager:
             await self.active_page.screenshot(path="screenshot.jpg", type="jpeg", quality=60)
             async with aiofiles.open("screenshot.jpg", "rb") as f:
                 image_bytes = await f.read()
-            
+
             dom = await self._extract_interactive_elements()
-            
+
             structured_state = {
                 "page_url": self.active_page.url,
                 "interactive_elements": dom[:40]
@@ -113,7 +123,7 @@ class BrowserManager:
                 types.Part.from_text(text=json.dumps(structured_state)),
                 types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg")
             ]
-        
+
     async def goto_url(self, url: str):
         """Navigates to the specified URL."""
         await self._ensure_started()
@@ -123,9 +133,63 @@ class BrowserManager:
             try:
                 await self.active_page.goto(url, timeout=10000, wait_until="domcontentloaded")
                 await self._wait_for_load_state()
-                return f"Navigated to {url}"
+                return {"status": "success", "url": self.active_page.url}
             except Exception as e:
-                return f"Error navigating to {url}: {str(e)}"
+                return {"status": "error", "message": f"Error navigating to {url}: {str(e)}"}
+
+    async def _click_by_text(
+        self, text: Optional[str], exact: bool, timeout_ms: int
+    ) -> Dict[str, Any]:
+        if not text:
+            return {"status": "error", "message": "mode='text' requires: text"}
+
+        for role in ["button", "link"]:
+            loc = self.active_page.get_by_role(role, name=text, exact=exact)
+            if await loc.count() > 0:
+                await loc.first.click(timeout=timeout_ms)
+                await self._wait_for_load_state()
+                return {"status": "success", "clicked_mode": "text", "role": role, "text": text, "url_after": self.active_page.url}
+
+        # fallback text locator
+        loc = self.active_page.locator(f"text={text}")
+        if await loc.count() == 0:
+            # fuzzy fallback: primi 10 caratteri
+            loc = self.active_page.locator(f"text={text[:10]}")
+            if await loc.count() == 0:
+                return {"status": "error", "message": f"No element found containing text: {text}"}
+
+        await loc.first.click(timeout=timeout_ms)
+        await self._wait_for_load_state()
+        return {"status": "success", "clicked_mode": "text", "role": None, "text": text, "url_after": self.active_page.url}
+
+    async def _click_by_selector(
+        self, selector: Optional[str], timeout_ms: int
+    ) -> Dict[str, Any]:
+        if not selector:
+            return {"status": "error", "message": "mode='selector' requires: selector"}
+
+        try:
+            el = await self.active_page.query_selector(self._sanitize_css_selector(selector))
+        except Exception as e:
+            print(f"[ERROR] Selector query failed: {selector}, error: {e}")
+            return {"status": "error", "message": f"Selector query failed: {e}"}
+        
+        if not el:
+            return {"status": "error", "message": f"No element found for selector: {selector}"}
+
+        await el.click(timeout=timeout_ms)
+        await self._wait_for_load_state()
+        return {"status": "success", "clicked_mode": "selector", "selector": selector, "url_after": self.active_page.url}
+
+    async def _click_by_coordinates(
+        self, coordinates: Optional[str]
+    ) -> Dict[str, Any]:
+        if not coordinates:
+            return {"status": "error", "message": "mode='coordinates' requires: coordinates"}
+        x, y = self._parse_point(coordinates)
+        await self.active_page.mouse.click(x, y)
+        await self._wait_for_load_state()
+        return {"status": "success", "clicked_mode": "coordinates", "clicked_at": [x, y], "url_after": self.active_page.url}
 
     async def click(
         self,
@@ -133,14 +197,12 @@ class BrowserManager:
         text: Optional[str] = None,
         selector: Optional[str] = None,
         coordinates: Optional[str] = None,
-        exact: bool = False,
-        timeout_ms: int = 10000
     ) -> Dict[str, Any]:
         """Click tool (multi-mode).
 
         Use cases:
         - mode="text": click an element containing `text`.
-        Provide: text, optional exact.
+        Provide: text
         - mode="selector": click an element by CSS/XPath selector.
         Provide: selector.
         - mode="coordinates": click at viewport coordinates "<point>x y</point>".
@@ -149,68 +211,35 @@ class BrowserManager:
         Returns:
         dict with clicked info and url_after, or {"error": "..."}.
         """
+        timeout_ms = 10000
+
         await self._ensure_started()
         async with self._page_lock:
             await self._wait_for_load_state()
             try:
                 if mode == "text":
-                    if not text:
-                        return {"error": "mode='text' requires: text"}
-
-                    # prova role
-                    for role in ["button", "link"]:
-                        loc = self.active_page.get_by_role(role, name=text, exact=exact)
-                        if await loc.count() > 0:
-                            await loc.first.click(timeout=timeout_ms)
-                            await self._wait_for_load_state()
-                            return {"clicked_mode": "text", "role": role, "text": text, "url_after": self.active_page.url}
-
-                    # fallback text=
-                    loc = self.active_page.locator(f'text="{text}"') if exact else self.active_page.locator(f"text={text}")
-                    if await loc.count() == 0:
-                        return {"error": f"No element found containing text: {text}"}
-                    await loc.first.click(timeout=timeout_ms)
-                    await self._wait_for_load_state()
-                    return {"clicked_mode": "text", "role": None, "text": text, "url_after": self.active_page.url}
+                    return await self._click_by_text(text, exact=True, timeout_ms=timeout_ms)
 
                 if mode == "selector":
-                    if not selector:
-                        return {"error": "mode='selector' requires: selector"}
-                    el = await self.active_page.query_selector(selector)
-                    if not el:
-                        return {"error": f"No element found for selector: {selector}"}
-                    await el.click(timeout=timeout_ms)
-                    await self._wait_for_load_state()
-                    return {"clicked_mode": "selector", "selector": selector, "url_after": self.active_page.url}
+                    return await self._click_by_selector(selector, timeout_ms=timeout_ms)
 
                 if mode == "coordinates":
-                    if not coordinates:
-                        return {"error": "mode='coordinates' requires: coordinates"}
-                    x, y = self._parse_point(coordinates)
-                    await self.active_page.mouse.click(x, y)
-                    await self._wait_for_load_state()
-                    return {"clicked_mode": "coordinates", "clicked_at": [x, y], "url_after": self.active_page.url}
+                    return await self._click_by_coordinates(coordinates)                        
 
-                return {"error": f"Unknown mode: {mode}"}
+                return {"status": "error", "message": f"Unknown mode: {mode}"}
 
             except PlaywrightTimeoutError as e:
-                return {"error": "Timeout during click", "mode": mode, "details": str(e)}
-
+                return {"status": "error", "message": "Timeout during click", "mode": mode, "details": str(e)}
 
     async def type(self, selector: str, content: str):
-        """Types into an input field safely.
-            - Scrolls into view
-            - Focuses the input
-            - Clears any existing text
-            - Types the new content
-        """
+        """Types into an input field safely."""
         await self._ensure_started()
         async with self._page_lock:
             print(f"[DEBUG] Typing into selector: {selector} with content: {content}")
 
             element = await self.active_page.query_selector(selector)
             if not element:
-                return {"error": f"No element found for selector: {selector}"}
+                return {"status": "error", "message": f"No element found for selector: {selector}"}
 
             await element.scroll_into_view_if_needed()
             await element.focus()
@@ -218,21 +247,117 @@ class BrowserManager:
             await element.type(content)
 
             await self._wait_for_load_state()
-            return {"typed_into": selector, "content": content}
-    
+            return {"status": "success", "typed_into": selector, "content": content}
+
+    async def _get_scroll_metrics(self) -> Dict[str, Any]:
+        """
+        Returns basic scroll metrics for the current page.
+        """
+        metrics = await self.active_page.evaluate("""
+            () => {
+                const scrollY = window.scrollY || window.pageYOffset;
+                const viewportH = window.innerHeight;
+                const docH = Math.max(
+                    document.body.scrollHeight,
+                    document.documentElement.scrollHeight,
+                    document.body.offsetHeight,
+                    document.documentElement.offsetHeight,
+                    document.body.clientHeight,
+                    document.documentElement.clientHeight
+                );
+                return {
+                    scrollY,
+                    viewportH,
+                    docH,
+                    atBottom: scrollY + viewportH >= docH - 2  // small tolerance
+                };
+            }
+        """)
+        return metrics
+
+    async def scroll_percent(
+        self, percent: float, before: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        if percent is None:
+            return {"status": "error", "message": "percent required"}
+        target = int((before["docH"] - before["viewportH"]) * (percent / 100))
+        await self.active_page.evaluate(
+            """({top}) => window.scrollTo({ top, left: 0 })""", {"top": target}
+        )
+
+    async def scroll_y(self, y: int, before: Dict[str, Any]) -> Dict[str, Any]:
+        if y is None:
+            return {"status": "error", "message": "y required"}
+        target = max(0, min(y, before["docH"] - before["viewportH"]))
+        await self.active_page.evaluate(
+            """({top}) => window.scrollTo({ top, left: 0 })""", {"top": target}
+        )
+
+    async def scroll_to_selector(self, selector: str) -> Dict[str, Any]:
+        if not selector:
+            return {"status": "error", "message": "selector required"}
+        try:
+            el = await self.active_page.query_selector(self._sanitize_css_selector(selector))
+        except Exception as e:
+            logging.warning(f"Selector query failed: {selector}, error: {e}")
+            return {"status": "error", "message": f"Selector query failed: {e}"}
+
+        if not el:
+            return {
+                "status": "error",
+                "message": f"No element for selector: {selector}",
+            }
+        await el.scroll_into_view_if_needed()
+
+    async def scroll_to_text(self, text: str) -> Dict[str, Any]:
+        if not text:
+            return {"status": "error", "message": "text required"}
+        needle = text.strip().lower()
+        found = await self.active_page.evaluate(
+            """(needle) => {
+                const elems = Array.from(document.querySelectorAll("h1,h2,h3,h4,h5,h6,a,button,p,li,section,div"));
+                for (const e of elems) {
+                    if ((e.innerText || "").toLowerCase().includes(needle)) {
+                        e.scrollIntoView({ block: "center" });
+                        return e.innerText.slice(0, 140);
+                    }
+                }
+                return null;
+            }""",
+            needle,
+        )
+        if not found:
+            return {"status": "error", "message": f"Text not found: {text}"}
+
+    async def scroll_step(
+        self,
+        direction: Literal["down", "up", "left", "right"],
+        steps: int,
+        before: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        step_px = int(before["viewportH"] * 0.8)
+        dx = dy = 0
+        if direction == "down":
+            dy = step_px
+        elif direction == "up":
+            dy = -step_px
+        elif direction == "right":
+            dx = step_px
+        elif direction == "left":
+            dx = -step_px
+        for _ in range(max(1, steps)):
+            await self.active_page.evaluate("""({dx, dy}) => window.scrollBy(dx, dy)""", {"dx": dx, "dy": dy})
+
+
     async def scroll(
         self,
         mode: Literal["step", "percent", "y", "to_text", "to_selector"] = "step",
         direction: Literal["down", "up", "left", "right"] = "down",
         steps: int = 1,
-        overlap: float = 0.15,
         percent: Optional[float] = None,
         y: Optional[int] = None,
         text: Optional[str] = None,
         selector: Optional[str] = None,
-        smooth: bool = False,
-        max_steps: int = 12,
-        settle_ms: int = 300,
     ) -> Dict[str, Any]:
         """
         Multi-mode scroll tool.
@@ -251,174 +376,47 @@ class BrowserManager:
         await self._ensure_started()
         async with self._page_lock:
 
+            async def _settle():
+                # small wait after scroll
+                await self.active_page.wait_for_timeout(300)
+
+            # get basic metrics
             before = await self._get_scroll_metrics()
 
-            # Helper: clamp overlap
-            ov = max(0.0, min(float(overlap), 0.5))
-
-            async def _do_settle():
-                # small wait after scroll to allow page to update (e.g. lazy load)
-                if settle_ms and settle_ms > 0:
-                    await self.active_page.wait_for_timeout(int(settle_ms))
-                await self._wait_for_load_state()
-
             if mode == "percent":
-                if percent is None:
-                    return {"status": "error", "message": "percent is required for mode='percent'"}
-
-                p = max(0.0, min(float(percent), 100.0))
-                # y target = (docH - viewportH) * p%
-                target = int((before["docH"] - before["viewportH"]) * (p / 100.0))
-                target = max(0, min(target, max(0, before["docH"] - before["viewportH"])))
-
-                await self.active_page.evaluate(
-                    """({top, smooth}) => {
-                        window.scrollTo({ top, left: 0, behavior: smooth ? "smooth" : "instant" });
-                    }""",
-                    {"top": target, "smooth": smooth},
-                )
-                await _do_settle()
+                await self.scroll_percent(percent, before)
 
             elif mode == "y":
-                if y is None:
-                    return {"status": "error", "message": "y is required for mode='y'"}
-
-                target = int(y)
-                target = max(0, min(target, max(0, before["docH"] - before["viewportH"])))
-
-                await self.active_page.evaluate(
-                    """({top, smooth}) => {
-                        window.scrollTo({ top, left: 0, behavior: smooth ? "smooth" : "instant" });
-                    }""",
-                    {"top": target, "smooth": smooth},
-                )
-                await _do_settle()
+                await self.scroll_y(y, before)
 
             elif mode == "to_selector":
-                if not selector:
-                    return {"status": "error", "message": "selector is required for mode='to_selector'"}
-
-                el = await self.active_page.query_selector(selector)
-                if not el:
-                    return {"status": "error", "message": f"No element found for selector: {selector}"}
-
-                # scroll into view, then optionally align in upper portion
-                await el.scroll_into_view_if_needed()
-                await self.active_page.evaluate("""
-                (sel) => {
-                const el = document.querySelector(sel);
-                if (!el) return;
-                const r = el.getBoundingClientRect();
-                const target = window.scrollY + r.top - (window.innerHeight * 0.2);
-                window.scrollTo({ top: target, left: 0, behavior: "instant" });
-                }
-                """, selector)
-                await _do_settle()
+                await self.scroll_to_selector(selector)
 
             elif mode == "to_text":
-                if not text:
-                    return {"status": "error", "message": "text is required for mode='to_text'"}
+                await self.scroll_to_text(text)
 
-                needle = text.strip()
-                if not needle:
-                    return {"status": "error", "message": "text is empty"}
+            else:  # step
+                await self.scroll_step(direction, steps, before)
 
-                # Scan loop: look for element containing text in viewport, if not found step with overlap, repeat up to max_steps.
-                found = None
-                attempts = 0
-
-                while attempts < max_steps:
-                    found = await self.active_page.evaluate("""
-                    (needle) => {
-                    needle = (needle || "").toLowerCase();
-
-                    // look for elements containing the text (case-insensitive)
-                    const candidates = Array.from(document.querySelectorAll("h1,h2,h3,h4,h5,h6,a,button,p,li,section,div"));
-                    for (const node of candidates) {
-                        const t = (node.innerText || node.textContent || "").trim();
-                        if (t && t.toLowerCase().includes(needle)) {
-                        const r = node.getBoundingClientRect();
-                        const target = window.scrollY + r.top - (window.innerHeight * 0.2);
-                        window.scrollTo({ top: target, left: 0, behavior: "instant" });
-                        return { tag: node.tagName, text: t.slice(0, 140) };
-                        }
-                    }
-                    return null;
-                    }
-                    """, needle)
-
-                    if found:
-                        break
-
-                    # if not found, step with overlap and try again
-                    metrics = await self._get_scroll_metrics()
-                    if metrics["atBottom"] and direction == "down":
-                        break
-
-                    step_px = int(metrics["viewportH"] * (1.0 - ov))
-                    dx = dy = 0
-                    if direction == "down":
-                        dy = step_px
-                    elif direction == "up":
-                        dy = -step_px
-                    elif direction == "right":
-                        dx = step_px
-                    elif direction == "left":
-                        dx = -step_px
-
-                    await self.active_page.evaluate("""({dx, dy}) => window.scrollBy(dx, dy)""", {"dx": dx, "dy": dy})
-                    await _do_settle()
-                    attempts += 1
-
-            else:
-                # default: step
-                metrics = before
-                step_px = int(metrics["viewportH"] * (1.0 - ov))
-                dx = dy = 0
-                if direction == "down":
-                    dy = step_px
-                elif direction == "up":
-                    dy = -step_px
-                elif direction == "right":
-                    dx = step_px
-                elif direction == "left":
-                    dx = -step_px
-
-                steps_n = max(1, int(steps))
-                for _ in range(steps_n):
-                    await self.active_page.evaluate("""({dx, dy}) => window.scrollBy(dx, dy)""", {"dx": dx, "dy": dy})
-                    await _do_settle()
-
+            await _settle()
             after = await self._get_scroll_metrics()
-            anchor = await self._get_viewport_anchor()
 
-            resp = {
+            return {
                 "status": "ok",
                 "mode": mode,
-                "direction": direction,
                 "scrollY_before": before["scrollY"],
                 "scrollY_after": after["scrollY"],
                 "docH": after["docH"],
                 "viewportH": after["viewportH"],
                 "atBottom": after["atBottom"],
-                "anchor": anchor,
             }
-
-            # Include anchor info for text/selector modes to help agent continuity
-            if mode == "to_text":
-                resp["target_text"] = text
-            if mode == "to_selector":
-                resp["target_selector"] = selector
-
-            return resp
-
 
     async def wait(self, ms: int = 5000):
         """Waits for a short period to allow the page to update."""
         await self._ensure_started()
         async with self._page_lock:
             await self.active_page.wait_for_timeout(ms)
-            return f"Waited for {ms} ms"
+            return {"status": "success", "waited_ms": ms}
 
     async def close(self):
         """Closes the browser and cleans up resources."""
@@ -437,4 +435,35 @@ class BrowserManager:
                 self.active_page = None
                 self._started = False
 
-            return "Closed"
+            return {"status": "success", "message": "Browser closed"}
+        
+    async def press_key(
+        self,
+        keys: List[str],
+    ) -> Dict[str, Any]:
+        """
+        Simulate pressing one or more keyboard keys in sequence.
+
+        Args:
+            keys: A list of key names to press in order.
+                Common keys: "Enter", "Tab", "ArrowDown", "ArrowUp",
+                "ArrowLeft", "ArrowRight", "Escape", "Backspace"
+                For combinations, separate keys in order:
+                e.g. ["Control", "A"] for Ctrl+A.
+
+        Returns:
+            A dict describing what was pressed.
+        """
+        await self._ensure_started()
+        async with self._page_lock:
+            await self._wait_for_load_state()
+
+            try:
+                for key in keys:
+                    await self.active_page.keyboard.press(key)
+
+                await self._wait_for_load_state()
+
+                return {"status": "success", "pressed_keys": keys, "url_after": self.active_page.url}
+            except Exception as e:
+                return {"status": "error", "message": f"Keyboard press failed: {str(e)}", "pressed_keys": keys}
