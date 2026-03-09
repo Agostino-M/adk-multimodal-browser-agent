@@ -2,7 +2,7 @@ import os
 from dotenv import load_dotenv
 from google.adk.agents import LlmAgent
 from google.adk.models.lite_llm import LiteLlm
-from google.adk.apps.app import App
+from google.adk.apps.app import App, EventsCompactionConfig
 from google.adk.plugins.multimodal_tool_results_plugin import MultimodalToolResultsPlugin
 
 from browser_agent.browser import BrowserManager
@@ -43,5 +43,9 @@ root_agent = LlmAgent(
 app = App(
     name="browser_agent",
     root_agent=root_agent,
+    events_compaction_config=EventsCompactionConfig(
+        compaction_interval=3,  # Trigger compaction every 3 new invocations.
+        overlap_size=1          # Include last invocation from the previous window.
+    ),
     plugins=[MultimodalToolResultsPlugin()],
 )
