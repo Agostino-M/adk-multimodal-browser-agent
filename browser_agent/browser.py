@@ -1,3 +1,4 @@
+import logging
 import re
 import json
 import asyncio
@@ -20,6 +21,7 @@ class BrowserManager:
         self._page_lock = asyncio.Lock()
 
     async def init(self):
+        logging.info(f"Initializing browser: {self._started}")
         if self._started:
             return
 
@@ -27,8 +29,9 @@ class BrowserManager:
         self.driver = await self.playwright.chromium.launch(headless=not self.show_browser)
 
         self.context = await self.driver.new_context(
+            viewport={"width": 1024, "height": 768},
             record_video_dir="videos/",
-            record_video_size={"width": 1280, "height": 720}
+            record_video_size={"width": 1024, "height": 768},
         )
 
         self.active_page = await self.context.new_page()
@@ -65,24 +68,76 @@ class BrowserManager:
 
         return int(numbers[0]), int(numbers[1])
 
-    async def _extract_interactive_elements(self):
-        elements = await self.active_page.evaluate("""
-        () => {
+    async def _extract_interactive_elements(self, limit: int = 50):
+        elements = await self.active_page.evaluate(
+            """
+            (limit) => {
             const els = Array.from(document.querySelectorAll(
                 'a, button, input, textarea, select, [role="button"]'
             ));
-            return els.map((el, index) => {
+
+            const clean = (s) => (s || '').replace(/\\s+/g, ' ').trim(); // normalize whitespace
+
+            const getText = (el) => {
+                const aria = el.getAttribute("aria-label");
+                if (aria) return aria;
+
+                const tag = el.tagName.toLowerCase();
+
+                if (tag === "input" || tag === "textarea") {
+                const type = (el.getAttribute("type") || "").toLowerCase();
+                const ph = el.getAttribute("placeholder") || "";
+                if (type === "password") return ph;
+                return ph || el.value || "";
+                }
+
+                if (tag === "select") {
+                const opt = el.selectedOptions && el.selectedOptions[0];
+                return (opt && (opt.innerText || opt.textContent)) || "";
+                }
+
+                return el.innerText || el.textContent || "";
+            };
+
+            const out = els.map((el) => {
                 const rect = el.getBoundingClientRect();
-                return {
-                    id: index,
-                    tag: el.tagName,
-                    text: el.innerText?.slice(0, 100),
-                    aria: el.getAttribute("aria-label"),
-                    rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height }
-                };
-            });
-        }
-        """)
+                if (rect.width <= 1 || rect.height <= 1) return null;
+
+                const style = window.getComputedStyle(el);
+                if (!style) return null;
+                if (style.display === 'none' || style.visibility === 'hidden') return null;
+                if (style.pointerEvents === 'none') return null;
+                if (Number(style.opacity) === 0) return null;
+
+                if (el.hasAttribute("disabled")) return null;
+                if (el.getAttribute("aria-disabled") === "true") return null;
+
+                const text = clean(getText(el)).slice(0, 100);
+
+                const tag = el.tagName.toLowerCase();
+                if (!text && !["input", "textarea", "select"].includes(tag)) return null; // filter out non-interactive elements without text
+
+                let result = `-${tag}: ${text}`;
+                
+                const attrs = [];
+                if (el.id) attrs.push(`id=${el.id}`);
+                const nameAttr = el.getAttribute("name");
+                if (nameAttr) attrs.push(`name=${nameAttr}`);
+                const ariaAttr = el.getAttribute("aria-label");
+                if (ariaAttr) attrs.push(`aria=${ariaAttr}`);
+                
+                if (attrs.length > 0) {
+                    result += ` (${attrs.join(', ')})`;
+                }
+
+                return result;                
+            }).filter(Boolean);
+
+            return out.slice(0, limit);
+            }
+            """,
+            limit,
+        )
         return elements
 
     def _sanitize_css_selector(self, selector: str) -> str:
@@ -96,33 +151,43 @@ class BrowserManager:
 
         return selector
 
-    async def get_state(self) -> List[types.Part]:
+    async def get_state(self, with_screenshot: bool = True) -> List[types.Part]:
         """
         Returns the full observable state of the browser.
 
         Includes:
         - Current page URL
-        - Screenshot of the visible viewport
-        - Structured list of interactive DOM elements
+        - Screenshot of the visible viewport (only if with_screenshot=True)
+        - Structured list of interactive DOM elements of all pages
         """
         await self._ensure_started()
         async with self._page_lock:
             await self._wait_for_load_state()
 
-            await self.active_page.screenshot(path="screenshot.jpg", type="jpeg", quality=60)
-            async with aiofiles.open("screenshot.jpg", "rb") as f:
-                image_bytes = await f.read()
+            dom = await self._extract_interactive_elements(40)
 
-            dom = await self._extract_interactive_elements()
+            # Compact custom format to save tokens
+            lines = [f"url: {self.active_page.url}"]
+            if dom:
+                lines.append("elements:")
+                lines.extend(dom)  # dom now contains pre-formatted strings
+            else:
+                lines.append("elements: none")
 
-            structured_state = {
-                "page_url": self.active_page.url,
-                "interactive_elements": dom[:40]
-            }
-            return [
-                types.Part.from_text(text=json.dumps(structured_state)),
-                types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg")
+            compact_text = "\n".join(lines)
+
+            state = [
+                types.Part.from_text(text=compact_text),
             ]
+
+            if with_screenshot:
+                await self.active_page.screenshot(path="screenshot.jpg", type="jpeg", quality=60)
+                async with aiofiles.open("screenshot.jpg", "rb") as f:
+                    image_bytes = await f.read()
+                    
+                state.append(types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"))
+
+            return state
 
     async def goto_url(self, url: str):
         """Navigates to the specified URL."""
@@ -148,19 +213,19 @@ class BrowserManager:
             if await loc.count() > 0:
                 await loc.first.click(timeout=timeout_ms)
                 await self._wait_for_load_state()
-                return {"status": "success", "clicked_mode": "text", "role": role, "text": text, "url_after": self.active_page.url}
+                clicked_text = await loc.first.inner_text()
+                return {"status": "success", "clicked_mode": "text", "role": role, "text": clicked_text, "url_after": self.active_page.url}
 
         # fallback text locator
-        loc = self.active_page.locator(f"text={text}")
+        loc = self.active_page.get_by_text(text, exact=exact)
         if await loc.count() == 0:
-            # fuzzy fallback: primi 10 caratteri
-            loc = self.active_page.locator(f"text={text[:10]}")
-            if await loc.count() == 0:
-                return {"status": "error", "message": f"No element found containing text: {text}"}
+            return {"status": "error", "message": f"No element found containing text: {text}"}
 
         await loc.first.click(timeout=timeout_ms)
         await self._wait_for_load_state()
-        return {"status": "success", "clicked_mode": "text", "role": None, "text": text, "url_after": self.active_page.url}
+        clicked_text = await loc.first.inner_text()
+        role = await loc.first.get_attribute("role") or "unknown"
+        return {"status": "success", "clicked_mode": "text", "role": role, "text": clicked_text, "url_after": self.active_page.url}
 
     async def _click_by_selector(
         self, selector: Optional[str], timeout_ms: int
@@ -171,7 +236,7 @@ class BrowserManager:
         try:
             el = await self.active_page.query_selector(self._sanitize_css_selector(selector))
         except Exception as e:
-            print(f"[ERROR] Selector query failed: {selector}, error: {e}")
+            logging.error(f"Selector query failed: {selector}, error: {e}")
             return {"status": "error", "message": f"Selector query failed: {e}"}
         
         if not el:
@@ -188,13 +253,20 @@ class BrowserManager:
             return {"status": "error", "message": "mode='coordinates' requires: coordinates"}
         x, y = self._parse_point(coordinates)
         await self.active_page.mouse.click(x, y)
+        clicked_text = await self.active_page.evaluate("""
+            ({x, y}) => {
+                const el = document.elementFromPoint(x, y);
+                return el ? (el.innerText || el.textContent || "").slice(0, 100) : "";
+            }
+        """, {"x": x, "y": y})
         await self._wait_for_load_state()
-        return {"status": "success", "clicked_mode": "coordinates", "clicked_at": [x, y], "url_after": self.active_page.url}
+        return {"status": "success", "clicked_mode": "coordinates", "clicked_at": [x, y], "text": clicked_text, "url_after": self.active_page.url}
 
     async def click(
         self,
         mode: Literal["text", "selector", "coordinates"] = "text",
         text: Optional[str] = None,
+        exact: bool = True,
         selector: Optional[str] = None,
         coordinates: Optional[str] = None,
     ) -> Dict[str, Any]:
@@ -218,7 +290,7 @@ class BrowserManager:
             await self._wait_for_load_state()
             try:
                 if mode == "text":
-                    return await self._click_by_text(text, exact=True, timeout_ms=timeout_ms)
+                    return await self._click_by_text(text, exact=exact, timeout_ms=timeout_ms)
 
                 if mode == "selector":
                     return await self._click_by_selector(selector, timeout_ms=timeout_ms)
@@ -235,16 +307,21 @@ class BrowserManager:
         """Types into an input field safely."""
         await self._ensure_started()
         async with self._page_lock:
-            print(f"[DEBUG] Typing into selector: {selector} with content: {content}")
+            logging.info(f"Typing into selector: {selector} with content: {content}")
 
-            element = await self.active_page.query_selector(selector)
-            if not element:
+            try:
+                el = await self.active_page.query_selector(selector)
+            except Exception as e:
+                logging.warning(f"Selector query failed: {selector}, error: {e}")
+                return {"status": "error", "message": f"Selector query failed: {e}"}
+
+            if not el:
                 return {"status": "error", "message": f"No element found for selector: {selector}"}
 
-            await element.scroll_into_view_if_needed()
-            await element.focus()
-            await element.fill("")
-            await element.type(content)
+            await el.scroll_into_view_if_needed()
+            await el.focus()
+            await el.fill("")
+            await el.type(content)
 
             await self._wait_for_load_state()
             return {"status": "success", "typed_into": selector, "content": content}
@@ -348,7 +425,6 @@ class BrowserManager:
         for _ in range(max(1, steps)):
             await self.active_page.evaluate("""({dx, dy}) => window.scrollBy(dx, dy)""", {"dx": dx, "dy": dy})
 
-
     async def scroll(
         self,
         mode: Literal["step", "percent", "y", "to_text", "to_selector"] = "step",
@@ -417,25 +493,6 @@ class BrowserManager:
         async with self._page_lock:
             await self.active_page.wait_for_timeout(ms)
             return {"status": "success", "waited_ms": ms}
-
-    async def close(self):
-        """Closes the browser and cleans up resources."""
-        async with self._page_lock:
-            try:
-                if self.context:
-                    await self.context.close()
-                if self.driver:
-                    await self.driver.close()
-                if self.playwright:
-                    await self.playwright.stop()
-            finally:
-                self.context = None
-                self.driver = None
-                self.playwright = None
-                self.active_page = None
-                self._started = False
-
-            return {"status": "success", "message": "Browser closed"}
         
     async def press_key(
         self,
@@ -467,3 +524,38 @@ class BrowserManager:
                 return {"status": "success", "pressed_keys": keys, "url_after": self.active_page.url}
             except Exception as e:
                 return {"status": "error", "message": f"Keyboard press failed: {str(e)}", "pressed_keys": keys}
+
+    async def close(self):
+        """Closes the browser and cleans up resources."""
+        async with self._browser_lock:
+            async with self._page_lock:
+                try:
+                    # Close in proper order: page -> context -> driver -> playwright
+                    if self.active_page:
+                        try:
+                            await self.active_page.close()
+                        except:
+                            pass
+                    if self.context:
+                        try:
+                            await self.context.close()
+                        except:
+                            pass
+                    if self.driver:
+                        try:
+                            await self.driver.close()
+                        except:
+                            pass
+                    if self.playwright:
+                        try:
+                            await self.playwright.stop()
+                        except:
+                            pass
+                finally:
+                    self.context = None
+                    self.driver = None
+                    self.playwright = None
+                    self.active_page = None
+                    self._started = False
+        
+        return {"status": "success", "message": "Browser closed"}
