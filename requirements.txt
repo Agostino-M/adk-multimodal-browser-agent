@@ -2,3 +2,5 @@ google-adk[extensions]
 playwright
 pydantic
 aiofiles
+sentence-transformers
+faiss-cpu 

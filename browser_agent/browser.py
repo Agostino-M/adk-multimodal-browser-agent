@@ -20,6 +20,10 @@ class BrowserManager:
         self._browser_lock = asyncio.Lock()
         self._page_lock = asyncio.Lock()
 
+        # RAG helper for DOM elements. We instantiate once to avoid
+        # reloading the transformer on every request.
+        self._dom_retriever = DOMRetriever()
+
     async def init(self):
         logging.info(f"Initializing browser: {self._started}")
         if self._started:
@@ -140,32 +144,49 @@ class BrowserManager:
         )
         return elements
 
-    def _sanitize_css_selector(self, selector: str) -> str:
-        selector = selector.strip()
+    async def _retrieve_relevant_elements(self, query: str, k: int = 5) -> Dict[str, Any]:
+        """Tool that performs a semantic search over the current DOM.
 
-        # escape quotes inside attribute values
-        selector = re.sub(r"(?<=\=)['\"]([^'\"]*)['\"]", lambda m: '"' + m.group(1).replace('"', '\\"') + '"', selector)
+        The agent can call this when it has a ``CURRENT TASK`` and wants to
+        narrow the list of interactive elements to those that appear
+        semantically relevant. ``query`` is usually the task description.
+        """
+        await self._ensure_started()
+        start = time.time()
+        # pull the latest elements from the page
+        elements = await self._extract_interactive_elements(limit=1000)
+        c1 = time.time()
+        logging.info(f"DOM extraction got {len(elements)} elements in {c1 - start:.2f} seconds for query: \"{query}\"")
+        if not query:
+            return elements[:k]  # if no query, just return the first k elements
 
-        # remove potentially dangerous characters that could break the selector
-        selector = re.sub(r"[^a-zA-Z0-9\[\]=\.\#\*\-_\s\>\+\~]", "", selector)
+        self._dom_retriever.build_index(elements)
+        c2 = time.time()
+        logging.info(f"DOM index built with {len(elements)} elements for query: \"{query}\" in {c2 - c1:.2f} seconds")
+        results = self._dom_retriever.query(query, k)
+        c3 = time.time()
+        logging.info(f"DOM retrieval for query: \"{query}\" returned {len(results)} results in {c3 - c2:.2f} seconds")
+        return results
 
-        return selector
-
-    async def get_state(self, with_screenshot: bool = True) -> List[types.Part]:
+    async def get_state(self, query: str = "", with_screenshot: bool = True) -> List[types.Part]:
         """
         Returns the full observable state of the browser.
+        ``query`` is an optional string that can be used to filter the DOM elements using the RAG tool before returning the state.
+        ``with_screenshot`` controls whether to include a screenshot of the current page in the returned state.
 
         Includes:
         - Current page URL
         - Screenshot of the visible viewport (only if with_screenshot=True)
-        - Structured list of interactive DOM elements of all pages
+        - Structured list of interactive DOM elements from the current page, optionally filtered by relevance to the query.
         """
         await self._ensure_started()
+
         async with self._page_lock:
             await self._wait_for_load_state()
 
-            dom = await self._extract_interactive_elements(40)
-
+            #dom = await self._extract_interactive_elements(40) old version without rag
+            dom = await self._retrieve_relevant_elements(query=query, k=30)  # new version with RAG filtering
+            logging.info(f"Retrieved {len(dom)} relevant DOM elements for state query: \"{query}\"")
             # Compact custom format to save tokens
             lines = [f"url: {self.active_page.url}"]
             if dom:
