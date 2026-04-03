@@ -1,12 +1,14 @@
 import logging
 import re
-import json
 import asyncio
+import time
 import aiofiles
 from google.genai import types
 from typing import Any, Dict, List, Literal, Optional
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 from playwright.async_api import async_playwright
+
+from browser_agent.dom_retriever import DOMRetriever
 
 
 class BrowserManager:
@@ -40,6 +42,13 @@ class BrowserManager:
 
         self.active_page = await self.context.new_page()
         self.active_page.set_default_timeout(10000)
+        
+        # Pre-load the SentenceTransformer model in a background thread
+        # to avoid latency (~30s) on first DOM retrieval query
+        logging.info("Pre-loading SentenceTransformer model for DOM retrieval...")
+        await asyncio.to_thread(self._dom_retriever._ensure_model_loaded)
+        logging.info("SentenceTransformer model loaded successfully")
+        
         self._started = True
 
     async def _ensure_started(self):
@@ -182,33 +191,38 @@ class BrowserManager:
         await self._ensure_started()
 
         async with self._page_lock:
-            await self._wait_for_load_state()
+            try:
+                await self._wait_for_load_state()
 
-            #dom = await self._extract_interactive_elements(40) old version without rag
-            dom = await self._retrieve_relevant_elements(query=query, k=30)  # new version with RAG filtering
-            logging.info(f"Retrieved {len(dom)} relevant DOM elements for state query: \"{query}\"")
-            # Compact custom format to save tokens
-            lines = [f"url: {self.active_page.url}"]
-            if dom:
-                lines.append("elements:")
-                lines.extend(dom)  # dom now contains pre-formatted strings
-            else:
-                lines.append("elements: none")
+                #dom = await self._extract_interactive_elements(40) old version without rag
+                dom = await self._retrieve_relevant_elements(query=query, k=30)  # new version with RAG filtering
+                logging.info(f"Retrieved {len(dom)} relevant DOM elements for state query: \"{query}\"")
+                # Compact custom format to save tokens
+                lines = [f"url: {self.active_page.url}"]
+                if dom:
+                    lines.append("elements:")
+                    lines.extend(dom)  # dom now contains pre-formatted strings
+                else:
+                    lines.append("elements: none")
 
-            compact_text = "\n".join(lines)
+                compact_text = "\n".join(lines)
 
-            state = [
-                types.Part.from_text(text=compact_text),
-            ]
+                state = [
+                    types.Part.from_text(text=compact_text),
+                ]
 
-            if with_screenshot:
-                await self.active_page.screenshot(path="screenshot.jpg", type="jpeg", quality=60)
-                async with aiofiles.open("screenshot.jpg", "rb") as f:
-                    image_bytes = await f.read()
-                    
-                state.append(types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"))
+                if with_screenshot:
+                    await self.active_page.screenshot(path="screenshot.jpg", type="jpeg", quality=60)
+                    async with aiofiles.open("screenshot.jpg", "rb") as f:
+                        image_bytes = await f.read()
+                        
+                    state.append(types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"))
 
-            return state
+            except Exception as e:
+                logging.error(f"Error in get_state: {e}")
+                state = [types.Part.from_text(text=f"Error retrieving state: {str(e)}")]
+        
+        return state
 
     async def goto_url(self, url: str):
         """Navigates to the specified URL."""
@@ -255,7 +269,7 @@ class BrowserManager:
             return {"status": "error", "message": "mode='selector' requires: selector"}
 
         try:
-            el = await self.active_page.query_selector(self._sanitize_css_selector(selector))
+            el = await self.active_page.query_selector(selector)
         except Exception as e:
             logging.error(f"Selector query failed: {selector}, error: {e}")
             return {"status": "error", "message": f"Selector query failed: {e}"}
@@ -272,14 +286,20 @@ class BrowserManager:
     ) -> Dict[str, Any]:
         if not coordinates:
             return {"status": "error", "message": "mode='coordinates' requires: coordinates"}
-        x, y = self._parse_point(coordinates)
-        await self.active_page.mouse.click(x, y)
-        clicked_text = await self.active_page.evaluate("""
-            ({x, y}) => {
-                const el = document.elementFromPoint(x, y);
-                return el ? (el.innerText || el.textContent || "").slice(0, 100) : "";
-            }
-        """, {"x": x, "y": y})
+        
+        try:
+            x, y = self._parse_point(coordinates)
+            await self.active_page.mouse.click(x, y)
+            clicked_text = await self.active_page.evaluate("""
+                ({x, y}) => {
+                    const el = document.elementFromPoint(x, y);
+                    return el ? (el.innerText || el.textContent || "").slice(0, 100) : "";
+                }
+            """, {"x": x, "y": y})
+        except Exception as e:
+            logging.error(f"Coordinates click failed: {coordinates}, error: {e}")
+            return {"status": "error", "message": f"Coordinates click failed: {e}"}
+    
         await self._wait_for_load_state()
         return {"status": "success", "clicked_mode": "coordinates", "clicked_at": [x, y], "text": clicked_text, "url_after": self.active_page.url}
 
@@ -332,19 +352,18 @@ class BrowserManager:
 
             try:
                 el = await self.active_page.query_selector(selector)
+                if el:
+                    await el.scroll_into_view_if_needed()
+                    await el.focus()
+                    await el.fill("")
+                    await el.type(content)
+                    await self._wait_for_load_state()
+                if not el:
+                    return {"status": "error", "message": f"No element found for selector: {selector}"}
             except Exception as e:
                 logging.warning(f"Selector query failed: {selector}, error: {e}")
                 return {"status": "error", "message": f"Selector query failed: {e}"}
 
-            if not el:
-                return {"status": "error", "message": f"No element found for selector: {selector}"}
-
-            await el.scroll_into_view_if_needed()
-            await el.focus()
-            await el.fill("")
-            await el.type(content)
-
-            await self._wait_for_load_state()
             return {"status": "success", "typed_into": selector, "content": content}
 
     async def _get_scroll_metrics(self) -> Dict[str, Any]:
@@ -395,7 +414,7 @@ class BrowserManager:
         if not selector:
             return {"status": "error", "message": "selector required"}
         try:
-            el = await self.active_page.query_selector(self._sanitize_css_selector(selector))
+            el = await self.active_page.query_selector(selector)
         except Exception as e:
             logging.warning(f"Selector query failed: {selector}, error: {e}")
             return {"status": "error", "message": f"Selector query failed: {e}"}
@@ -527,7 +546,7 @@ class BrowserManager:
                 Common keys: "Enter", "Tab", "ArrowDown", "ArrowUp",
                 "ArrowLeft", "ArrowRight", "Escape", "Backspace"
                 For combinations, separate keys in order:
-                e.g. ["Control", "A"] for Ctrl+A.
+                e.g. ["Control", "A"] for Control+A, or ["Control", "Shift", "A"] for Control+Shift+A.
 
         Returns:
             A dict describing what was pressed.
@@ -537,8 +556,19 @@ class BrowserManager:
             await self._wait_for_load_state()
 
             try:
-                for key in keys:
-                    await self.active_page.keyboard.press(key)
+                def is_modifier(k: str) -> bool:
+                    return k in {"Control", "Shift", "Alt"}
+
+                if len(keys) == 1:
+                    await self.active_page.keyboard.press(keys[0])
+                elif len(keys) > 1 and all(is_modifier(k) for k in keys[:-1]) and not is_modifier(keys[-1]):
+                    # Handle combination like Control+A or Control+Shift+A
+                    combo = "+".join(keys)
+                    await self.active_page.keyboard.press(combo)
+                else:
+                    # Press sequentially
+                    for key in keys:
+                        await self.active_page.keyboard.press(key)
 
                 await self._wait_for_load_state()
 
