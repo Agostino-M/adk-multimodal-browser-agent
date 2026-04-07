@@ -177,11 +177,12 @@ class BrowserManager:
         logging.info(f"DOM retrieval for query: \"{query}\" returned {len(results)} results in {c3 - c2:.2f} seconds")
         return results
 
-    async def get_state(self, query: str = "", with_screenshot: bool = True) -> List[types.Part]:
+    async def get_state(self, query: str = "", with_screenshot: bool = True, full_page_screenshot: bool = False) -> List[types.Part]:
         """
         Returns the full observable state of the browser.
         ``query`` is an optional string that can be used to filter the DOM elements using the RAG tool before returning the state.
         ``with_screenshot`` controls whether to include a screenshot of the current page in the returned state.
+        ``full_page_screenshot`` controls whether to take a full page screenshot or only a viewport screenshot.
 
         Includes:
         - Current page URL
@@ -197,8 +198,19 @@ class BrowserManager:
                 #dom = await self._extract_interactive_elements(40) old version without rag
                 dom = await self._retrieve_relevant_elements(query=query, k=30)  # new version with RAG filtering
                 logging.info(f"Retrieved {len(dom)} relevant DOM elements for state query: \"{query}\"")
+
+                # Get scroll metrics using the custom function _get_scroll_metrics
+                metrics = await self._get_scroll_metrics()
+
+                # Calculate the visible percentage of the page
+                visible_percentage = (metrics["viewportH"] / metrics["docH"]) * 100
+                scroll_position = metrics["scrollY"]
+
                 # Compact custom format to save tokens
                 lines = [f"url: {self.active_page.url}"]
+                lines.append(f"visible_percentage: {visible_percentage:.2f}% of the page visible in the viewport.")
+                lines.append(f"scroll_position: {scroll_position} pixels down the page.")
+                
                 if dom:
                     lines.append("elements:")
                     lines.extend(dom)  # dom now contains pre-formatted strings
@@ -211,11 +223,22 @@ class BrowserManager:
                     types.Part.from_text(text=compact_text),
                 ]
 
+                # Screenshot part
                 if with_screenshot:
-                    await self.active_page.screenshot(path="screenshot.jpg", type="jpeg", quality=60)
-                    async with aiofiles.open("screenshot.jpg", "rb") as f:
+                    if full_page_screenshot:
+                        # Take a full-page screenshot
+                        await self.active_page.screenshot(path="screenshot_full.jpg", full_page=True, type="jpeg", quality=60)
+                        screenshot_path = "screenshot_full.jpg"
+                    else:
+                        # Take only the visible viewport screenshot
+                        await self.active_page.screenshot(path="screenshot_viewport.jpg", full_page=False, type="jpeg", quality=60)
+                        screenshot_path = "screenshot_viewport.jpg"
+
+                    # Read the image file as bytes
+                    async with aiofiles.open(screenshot_path, "rb") as f:
                         image_bytes = await f.read()
-                        
+
+                    # Append the screenshot to the state
                     state.append(types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"))
 
             except Exception as e:
@@ -305,7 +328,7 @@ class BrowserManager:
 
     async def click(
         self,
-        mode: Literal["text", "selector", "coordinates"] = "text",
+        mode: Literal["text", "selector", "coordinates"],
         text: Optional[str] = None,
         exact: bool = True,
         selector: Optional[str] = None,
@@ -401,6 +424,7 @@ class BrowserManager:
         await self.active_page.evaluate(
             """({top}) => window.scrollTo({ top, left: 0 })""", {"top": target}
         )
+        return {"status": "success"}
 
     async def scroll_y(self, y: int, before: Dict[str, Any]) -> Dict[str, Any]:
         if y is None:
@@ -409,6 +433,7 @@ class BrowserManager:
         await self.active_page.evaluate(
             """({top}) => window.scrollTo({ top, left: 0 })""", {"top": target}
         )
+        return {"status": "success"}
 
     async def scroll_to_selector(self, selector: str) -> Dict[str, Any]:
         if not selector:
@@ -425,6 +450,7 @@ class BrowserManager:
                 "message": f"No element for selector: {selector}",
             }
         await el.scroll_into_view_if_needed()
+        return {"status": "success"}
 
     async def scroll_to_text(self, text: str) -> Dict[str, Any]:
         if not text:
@@ -445,6 +471,7 @@ class BrowserManager:
         )
         if not found:
             return {"status": "error", "message": f"Text not found: {text}"}
+        return {"status": "success"}
 
     async def scroll_step(
         self,
@@ -464,11 +491,12 @@ class BrowserManager:
             dx = -step_px
         for _ in range(max(1, steps)):
             await self.active_page.evaluate("""({dx, dy}) => window.scrollBy(dx, dy)""", {"dx": dx, "dy": dy})
+        return {"status": "success"}
 
     async def scroll(
         self,
-        mode: Literal["step", "percent", "y", "to_text", "to_selector"] = "step",
-        direction: Literal["down", "up", "left", "right"] = "down",
+        mode: Literal["step", "percent", "y", "to_text", "to_selector"],
+        direction: Literal["down", "up", "left", "right"],
         steps: int = 1,
         percent: Optional[float] = None,
         y: Optional[int] = None,
@@ -496,36 +524,50 @@ class BrowserManager:
                 # small wait after scroll
                 await self.active_page.wait_for_timeout(300)
 
-            # get basic metrics
-            before = await self._get_scroll_metrics()
+            try:
+                # get basic metrics
+                before = await self._get_scroll_metrics()
 
-            if mode == "percent":
-                await self.scroll_percent(percent, before)
+                if mode == "percent":
+                    result = await self.scroll_percent(percent, before)
+                    if result["status"] == "error":
+                        return result
 
-            elif mode == "y":
-                await self.scroll_y(y, before)
+                elif mode == "y":
+                    result = await self.scroll_y(y, before)
+                    if result["status"] == "error":
+                        return result
 
-            elif mode == "to_selector":
-                await self.scroll_to_selector(selector)
+                elif mode == "to_selector":
+                    result = await self.scroll_to_selector(selector)
+                    if result["status"] == "error":
+                        return result
 
-            elif mode == "to_text":
-                await self.scroll_to_text(text)
+                elif mode == "to_text":
+                    result = await self.scroll_to_text(text)
+                    if result["status"] == "error":
+                        return result
 
-            else:  # step
-                await self.scroll_step(direction, steps, before)
+                else:  # step
+                    result = await self.scroll_step(direction, steps, before)
+                    if result["status"] == "error":
+                        return result
 
-            await _settle()
-            after = await self._get_scroll_metrics()
+                await _settle()
+                after = await self._get_scroll_metrics()
 
-            return {
-                "status": "ok",
-                "mode": mode,
-                "scrollY_before": before["scrollY"],
-                "scrollY_after": after["scrollY"],
-                "docH": after["docH"],
-                "viewportH": after["viewportH"],
-                "atBottom": after["atBottom"],
-            }
+                return {
+                    "status": "ok",
+                    "mode": mode,
+                    "scrollY_before": before["scrollY"],
+                    "scrollY_after": after["scrollY"],
+                    "docH": after["docH"],
+                    "viewportH": after["viewportH"],
+                    "atBottom": after["atBottom"],
+                }
+            except Exception as e:
+                logging.error(f"Scroll failed: {mode}, error: {e}")
+                return {"status": "error", "message": f"Scroll failed: {e}"}
 
     async def wait(self, ms: int = 5000):
         """Waits for a short period to allow the page to update."""
