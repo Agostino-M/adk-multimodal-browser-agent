@@ -3,4 +3,6 @@ playwright
 pydantic
 aiofiles
 sentence-transformers
-faiss-cpu 
+faiss-cpu
+langfuse
+openinference-instrumentation-google-adk

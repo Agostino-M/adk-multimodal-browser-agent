@@ -1,5 +1,8 @@
 import os
 from dotenv import load_dotenv
+from langfuse import get_client
+from openinference.instrumentation.google_adk import GoogleADKInstrumentor
+
 from google.adk.agents import LlmAgent
 from google.adk.models.lite_llm import LiteLlm
 from google.adk.apps.app import App, EventsCompactionConfig
@@ -10,9 +13,13 @@ from browser_agent.prompt import prompt_base
 
 load_dotenv()
 
+MODEL_NAME = os.getenv("MODEL_NAME")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 if not OPENROUTER_API_KEY:
     raise ValueError("OPENROUTER_API_KEY not found")
+
+langfuse = get_client()
+GoogleADKInstrumentor().instrument()
 
 browser = BrowserManager(show_browser=True)
 
@@ -34,7 +41,7 @@ root_agent = LlmAgent(
     model=LiteLlm(
         api_base="https://openrouter.ai/api/v1",
         api_key=OPENROUTER_API_KEY,
-        model="openai/qwen/qwen3-vl-30b-a3b-thinking",
+        model=MODEL_NAME,
     ),
     instruction=prompt_base,
     name="web_agent_test",
