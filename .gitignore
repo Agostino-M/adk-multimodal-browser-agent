@@ -210,3 +210,4 @@ __marimo__/
 *jpg
 .adk/
 videos/
+.DS_Store
