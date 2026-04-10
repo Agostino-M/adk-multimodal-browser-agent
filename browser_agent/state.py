@@ -131,14 +131,15 @@ def remove_subtask(tool_context: ToolContext, task_id: str):
 
     # Update current_subtask_id if necessary
     if state.current_subtask_id == task_id:
-        if state.subtasks:
-            if idx < len(state.subtasks):
-                state.current_subtask_id = state.subtasks[idx].id
-            else:
-                # fallback:last available task
-                state.current_subtask_id = state.subtasks[-1].id
-        else:
-            state.current_subtask_id = None
+        state.current_subtask_id = None
+    #    if state.subtasks:
+    #        if idx < len(state.subtasks):
+    #            state.current_subtask_id = state.subtasks[idx].id
+    #        else:
+    #            # fallback:last available task
+    #            state.current_subtask_id = state.subtasks[-1].id
+    #    else:
+    #        state.current_subtask_id = None
 
     _save_state(tool_context, state)
     return state
