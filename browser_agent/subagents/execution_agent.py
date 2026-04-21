@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 from dotenv import load_dotenv
 
 from google.adk.agents import LlmAgent
@@ -8,7 +9,9 @@ from browser_agent.prompt import web_execution_prompt
 from browser_agent.callbacks import inject_current_task, validate_execution_tools
 from browser_agent.browser import BrowserManager
 
-load_dotenv()
+ENV_PATH = Path(__file__).parent.resolve().with_name(".env")
+print(ENV_PATH)
+load_dotenv(dotenv_path=ENV_PATH)
 
 ENG_API_KEY = os.getenv("ENG_API_KEY")
 if not ENG_API_KEY:

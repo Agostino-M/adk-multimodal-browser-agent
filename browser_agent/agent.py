@@ -24,7 +24,8 @@ from browser_agent.state import (
 
 logging.basicConfig(level=logging.DEBUG)
 
-load_dotenv()
+ENV_PATH = Path(__file__).resolve().with_name(".env")
+load_dotenv(dotenv_path=ENV_PATH)
 
 MODEL_NAME = os.getenv("MODEL_NAME")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
