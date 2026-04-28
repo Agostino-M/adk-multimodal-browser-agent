@@ -5,6 +5,7 @@ from dotenv import load_dotenv
 from google.adk.agents import LlmAgent
 from google.adk.models.lite_llm import LiteLlm
 
+from browser_agent.event_compaction import event_compaction
 from browser_agent.prompt import web_execution_prompt
 from browser_agent.callbacks import inject_current_task, validate_execution_tools
 from browser_agent.browser import BrowserManager
@@ -43,4 +44,5 @@ execution_agent = LlmAgent(
     include_contents="none",
     before_model_callback=inject_current_task,
     before_tool_callback=validate_execution_tools,
+    after_model_callback=event_compaction,
 )
