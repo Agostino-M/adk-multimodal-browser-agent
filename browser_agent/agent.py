@@ -1,5 +1,6 @@
 import logging
 import os
+from pathlib import Path
 from dotenv import load_dotenv
 from langfuse import get_client
 from openinference.instrumentation.google_adk import GoogleADKInstrumentor
@@ -28,13 +29,16 @@ ENV_PATH = Path(__file__).resolve().with_name(".env")
 load_dotenv(dotenv_path=ENV_PATH)
 
 MODEL_NAME = os.getenv("MODEL_NAME")
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
-if not OPENROUTER_API_KEY:
-    raise ValueError("OPENROUTER_API_KEY not found")
+if not MODEL_NAME:
+    raise ValueError("MODEL_NAME not found")
 
-ENG_API_KEY = os.getenv("ENG_API_KEY")
-if not ENG_API_KEY:
-    raise ValueError("ENG_API_KEY not found.")
+API_BASE = os.getenv("API_BASE")
+if not API_BASE:
+    raise ValueError("API_BASE not found")
+
+API_KEY = os.getenv("API_KEY")
+if not API_KEY:
+    raise ValueError("API_KEY not found.")
 
 langfuse = get_client()
 GoogleADKInstrumentor().instrument()
@@ -57,9 +61,10 @@ planner_tools = [
 root_agent = LlmAgent(
     name="planner_orchestrator",
     model=LiteLlm(
-        api_base="https://openrouter.ai/api/v1",
-        api_key=OPENROUTER_API_KEY,
+        api_base=API_BASE,
+        api_key=API_KEY,
         model=MODEL_NAME,
+        chat_template_kwargs={"enable_thinking": False},
     ),
     instruction=planner_prompt,
     tools=planner_tools,
