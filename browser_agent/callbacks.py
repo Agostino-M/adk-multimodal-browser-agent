@@ -84,7 +84,25 @@ def validate_execution_tools(tool: BaseTool, args: Dict[str, Any], tool_context:
     Before tool callback to enforce constraints for the execution agent, ensuring it only uses browser tools and follows execution rules.
     """
     tool_name = tool.name
+    logging.info(f"Invoked tool: {tool_name} with args: {args}")
     if tool_name not in BROWSER_TOOL_NAMES:
         return f"Tool '{tool_name}' does not exist. Available tools: {BROWSER_TOOL_NAMES}"
-    
+    logging.debug(f"user_content:{tool_context.user_content},actions:{tool_context.actions},state:{tool_context.state},session:{tool_context.session},")
+    # Check if prompt requests to close browser
+    if tool_name == "close":
+        user_message = tool_context.user_content.parts[0].text if tool_context.user_content and tool_context.user_content.parts else ""
+        logging.debug(f"Request to close browser detected. User message: {user_message}")
+
+        close_browser_patterns = [
+            r"\bclose\s+browser\b",  # "close browser"
+            r"\bshut\s+down\s+browser\b",  # "shut down browser"
+            r"\bexit\s+browser\b",  # "exit browser"
+            r"\bclose\s+the\s+browser\b",  # "close the browser"
+            r"\bclose\s+the\s+web\s+browser\b",  # "close the web browser"
+            r"\bshutdown\s+browser\b",  # "shutdown browser"
+        ]
+        
+        if not any(re.search(pattern, user_message, re.IGNORECASE) for pattern in close_browser_patterns):
+            return "Error: The 'close_browser' tool was invoked, but the prompt did not explicitly request it."
+
     return None
