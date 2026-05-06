@@ -23,6 +23,7 @@ BROWSER_TOOL_NAMES = [
     "scroll",
     "goto_url",
     "get_state",
+    "switch_page",
     "press_key",
     "wait",
     "close"

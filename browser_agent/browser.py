@@ -21,6 +21,7 @@ class BrowserManager:
         self._started = False
         self._browser_lock = asyncio.Lock()
         self._page_lock = asyncio.Lock()
+        self._new_pages_opened = 0
 
         # RAG helper for DOM elements. We instantiate once to avoid
         # reloading the transformer on every request.
@@ -39,6 +40,9 @@ class BrowserManager:
             record_video_dir="videos/",
             record_video_size={"width": 1024, "height": 768},
         )
+
+        # Track new pages/tabs so the agent can decide whether to switch.
+        self.context.on("page", self._handle_new_page)
 
         self.active_page = await self.context.new_page()
         self.active_page.set_default_timeout(10000)
@@ -64,6 +68,15 @@ class BrowserManager:
             await self.active_page.wait_for_load_state("networkidle", timeout=5000)
         except:
             pass
+
+    async def _handle_new_page(self, page):
+        """Handle new pages (popups/tabs) by recording them for later inspection."""
+        try:
+            url = page.url
+        except Exception:
+            url = ""
+        logging.info(f"New page opened: {url}. Tracking it for page switching.")
+        self._new_pages_opened += 1
 
     def _parse_point(self, point: str):
         # support both <point>x y</point> and HTML-escaped &lt;point&gt;x y&lt;/point&gt;
@@ -206,10 +219,22 @@ class BrowserManager:
                 visible_percentage = (metrics["viewportH"] / metrics["docH"]) * 100
                 scroll_position = metrics["scrollY"]
 
+                # Build page overview for all open tabs/pages
+                pages = self.context.pages
+                page_lines = [f"pages_open: {len(pages)}"]
+                for idx, page in enumerate(pages):
+                    try:
+                        title = await page.title()
+                    except Exception:
+                        title = ""
+                    active_flag = "(active)" if page == self.active_page else ""
+                    page_lines.append(f"  {idx}: {active_flag} {title or 'no title'} | {page.url}")
+
                 # Compact custom format to save tokens
                 lines = [f"url: {self.active_page.url}"]
                 lines.append(f"visible_percentage: {visible_percentage:.2f}% of the page visible in the viewport.")
-                lines.append(f"scroll_position: {scroll_position} pixels down the page.")
+                lines.append(f"scroll_position: {scroll_position:.2f} pixels down the page.")
+                lines.extend(page_lines)
                 
                 if dom:
                     lines.append("elements:")
@@ -253,12 +278,19 @@ class BrowserManager:
         async with self._page_lock:
             if not url.startswith(("http://", "https://")):
                 url = "https://" + url
+            self._new_pages_opened = 0  # Reset counter before action
             try:
                 await self.active_page.goto(url, timeout=10000, wait_until="domcontentloaded")
                 await self._wait_for_load_state()
-                return {"status": "success", "url": self.active_page.url}
+                result = {"status": "success", "url": self.active_page.url}
+                if self._new_pages_opened > 0:
+                    result["new_pages_opened"] = self._new_pages_opened
+                return result
             except Exception as e:
-                return {"status": "error", "message": f"Error navigating to {url}: {str(e)}"}
+                result = {"status": "error", "message": f"Error navigating to {url}: {str(e)}"}
+                if self._new_pages_opened > 0:
+                    result["new_pages_opened"] = self._new_pages_opened
+                return result
 
     async def _click_by_text(
         self, text: Optional[str], exact: bool, timeout_ms: int
@@ -352,20 +384,82 @@ class BrowserManager:
         await self._ensure_started()
         async with self._page_lock:
             await self._wait_for_load_state()
+            self._new_pages_opened = 0  # Reset counter before action
             try:
+                result = None
                 if mode == "text":
-                    return await self._click_by_text(text, exact=exact, timeout_ms=timeout_ms)
+                    result = await self._click_by_text(text, exact=exact, timeout_ms=timeout_ms)
 
-                if mode == "selector":
-                    return await self._click_by_selector(selector, timeout_ms=timeout_ms)
+                elif mode == "selector":
+                    result = await self._click_by_selector(selector, timeout_ms=timeout_ms)
 
-                if mode == "coordinates":
-                    return await self._click_by_coordinates(coordinates)                        
+                elif mode == "coordinates":
+                    result = await self._click_by_coordinates(coordinates)                        
 
-                return {"status": "error", "message": f"Unknown mode: {mode}"}
+                else:
+                    result = {"status": "error", "message": f"Unknown mode: {mode}"}
+
+                # Add popup info if any new pages opened
+                if self._new_pages_opened > 0:
+                    result["new_pages_opened"] = self._new_pages_opened
+
+                return result
 
             except PlaywrightTimeoutError as e:
-                return {"status": "error", "message": "Timeout during click", "mode": mode, "details": str(e)}
+                result = {"status": "error", "message": "Timeout during click", "mode": mode, "details": str(e)}
+                if self._new_pages_opened > 0:
+                    result["new_pages_opened"] = self._new_pages_opened
+                return result
+
+    async def switch_page(
+        self,
+        index: Optional[int] = None,
+        url: Optional[str] = None,
+        title: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Switch the active page by index, URL substring, or title substring."""
+        await self._ensure_started()
+        async with self._page_lock:
+            pages = self.context.pages
+            if not pages:
+                return {"status": "error", "message": "No pages available to switch."}
+
+            selected_page = None
+            if index is not None:
+                if index < 0 or index >= len(pages):
+                    return {"status": "error", "message": f"Page index out of range: {index}"}
+                selected_page = pages[index]
+            elif url:
+                lower_url = url.lower()
+                for page in pages:
+                    if lower_url in page.url.lower():
+                        selected_page = page
+                        break
+                if selected_page is None:
+                    return {"status": "error", "message": f"No page found matching URL: {url}"}
+            elif title:
+                needle = title.lower()
+                for page in pages:
+                    try:
+                        page_title = await page.title()
+                    except Exception:
+                        page_title = ""
+                    if needle in page_title.lower():
+                        selected_page = page
+                        break
+                if selected_page is None:
+                    return {"status": "error", "message": f"No page found matching title: {title}"}
+            else:
+                return {"status": "error", "message": "Must provide index, url, or title to switch_page."}
+
+            self.active_page = selected_page
+            self.active_page.set_default_timeout(10000)
+            return {
+                "status": "success",
+                "active_index": pages.index(selected_page),
+                "url": selected_page.url,
+                "title": await selected_page.title(),
+            }
 
     async def type(self, selector: str, content: str):
         """Types into an input field safely."""

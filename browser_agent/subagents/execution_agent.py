@@ -32,6 +32,7 @@ browser_tools = [
     browser.scroll,
     browser.goto_url,
     browser.get_state,
+    browser.switch_page,
     browser.press_key,
     browser.wait,
     browser.close,
