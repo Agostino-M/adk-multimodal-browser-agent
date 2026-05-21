@@ -37,7 +37,8 @@ class SessionState(BaseModel):
     next_subtask_id: int = 1  # counter for ids
     final_answer: Optional[str] = None
     summary_of_actions: Optional[str] = None
-
+    step_count: int = 0
+    terminate_execution_agent: bool = False
 
 def _load_state(tool_context: ToolContext) -> SessionState:
     raw_state = (
@@ -186,6 +187,7 @@ def update_current_subtask(tool_context: ToolContext, done: bool, results: Optio
         else:
             current.retry += 1
 
+    state.current_subtask_id = None
     _save_state(tool_context, state)
 
     return state
