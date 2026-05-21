@@ -5,6 +5,7 @@ import time
 import aiofiles
 from google.genai import types
 from typing import Any, Dict, List, Literal, Optional
+from playwright.async_api import Locator
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 from playwright.async_api import async_playwright
 
@@ -93,7 +94,51 @@ class BrowserManager:
             raise ValueError(f"Invalid point format: {point}")
 
         return int(numbers[0]), int(numbers[1])
-
+   
+    async def _resolve_locator(
+        self,
+        selector: str,
+        *,
+        require_enabled: bool = True,
+        require_editable: bool = False,
+    ) -> Optional[Locator]:
+        """Pick the first node matching selector that passes visibility/interaction checks."""
+        try:
+            root = self.active_page.locator(selector)
+            n = await root.count()
+        except Exception as e:
+            logging.warning("locator(%r) failed: %s", selector, e)
+            return None
+        
+        for i in range(n):
+            cand = root.nth(i)
+            try:
+                if not await cand.is_visible():
+                    continue
+                if require_enabled and not await cand.is_enabled():
+                    continue
+                if require_editable and not await cand.is_editable():
+                    continue
+            except Exception:
+                continue
+            return cand
+        return None
+ 
+    async def _scroll_into_view(self, loc: Locator, log_selector: str) -> None:
+        try:
+            await loc.scroll_into_view_if_needed(timeout=3000)
+        except PlaywrightTimeoutError:
+            logging.warning(
+                "scroll_into_view_if_needed timed out for selector=%r; using JS scroll fallback",
+                log_selector,
+            )
+            try:
+                await loc.evaluate(
+                    """e => e.scrollIntoView({ block: 'center', inline: 'nearest' })"""
+                )
+            except Exception:
+                pass
+ 
     async def _extract_interactive_elements(self, limit: int = 50):
         elements = await self.active_page.evaluate(
             """
@@ -297,26 +342,36 @@ class BrowserManager:
     ) -> Dict[str, Any]:
         if not text:
             return {"status": "error", "message": "mode='text' requires: text"}
-
-        for role in ["button", "link"]:
+ 
+        # Prefer accessible name (includes aria-label). Covers combobox / search fields
+        # where get_by_text fails because there is no visible text node.
+        for role in ("button", "link", "textbox", "searchbox", "combobox"):
             loc = self.active_page.get_by_role(role, name=text, exact=exact)
             if await loc.count() > 0:
+                clicked_text = await loc.first.inner_text()
                 await loc.first.click(timeout=timeout_ms)
                 await self._wait_for_load_state()
-                clicked_text = await loc.first.inner_text()
                 return {"status": "success", "clicked_mode": "text", "role": role, "text": clicked_text, "url_after": self.active_page.url}
-
-        # fallback text locator
+ 
+        loc = self.active_page.get_by_label(text, exact=exact)
+        if await loc.count() > 0:
+            clicked_text = await loc.first.inner_text()
+            role = await loc.first.get_attribute("role") or "label"
+            await loc.first.click(timeout=timeout_ms)
+            await self._wait_for_load_state()
+            return {"status": "success", "clicked_mode": "text", "role": role, "text": clicked_text, "url_after": self.active_page.url}
+ 
+        # fallback: visible text / subtree text (does not match aria-label-only inputs)
         loc = self.active_page.get_by_text(text, exact=exact)
         if await loc.count() == 0:
             return {"status": "error", "message": f"No element found containing text: {text}"}
-
+ 
+        clicked_text = await loc.first.inner_text()
         await loc.first.click(timeout=timeout_ms)
         await self._wait_for_load_state()
-        clicked_text = await loc.first.inner_text()
         role = await loc.first.get_attribute("role") or "unknown"
         return {"status": "success", "clicked_mode": "text", "role": role, "text": clicked_text, "url_after": self.active_page.url}
-
+ 
     async def _click_by_selector(
         self, selector: Optional[str], timeout_ms: int
     ) -> Dict[str, Any]:
@@ -324,15 +379,25 @@ class BrowserManager:
             return {"status": "error", "message": "mode='selector' requires: selector"}
 
         try:
-            el = await self.active_page.query_selector(selector)
+            loc = await self._resolve_locator(selector, require_enabled=True, require_editable=False)
         except Exception as e:
             logging.error(f"Selector query failed: {selector}, error: {e}")
             return {"status": "error", "message": f"Selector query failed: {e}"}
-        
-        if not el:
-            return {"status": "error", "message": f"No element found for selector: {selector}"}
-
-        await el.click(timeout=timeout_ms)
+       
+        if not loc:
+            try:
+                n = await self.active_page.locator(selector).count()
+            except Exception:
+                n = 0
+            if n == 0:
+                return {"status": "error", "message" : f"No element for selector: {selector}"}
+            
+            return {
+                "status": "error",
+                "message": f"No visible and enabled element for selector: {selector}, ({n} node(s) matched but none were interactable)",
+            }
+ 
+        await loc.click(timeout=timeout_ms)
         await self._wait_for_load_state()
         return {"status": "success", "clicked_mode": "selector", "selector": selector, "url_after": self.active_page.url}
 
@@ -369,12 +434,13 @@ class BrowserManager:
         """Click tool (multi-mode).
 
         Use cases:
-        - mode="text": click an element containing `text`.
+        - mode="text": click using `text` as accessible name (button/link/textbox/searchbox/combobox),
+          then label/aria-label, then visible substring text.
         Provide: text
         - mode="selector": click an element by CSS/XPath selector.
-        Provide: selector.
+        Provide: selector
         - mode="coordinates": click at viewport coordinates "<point>x y</point>".
-        Provide: coordinates. Use only if text/selector cannot uniquely identify the element.
+        Provide: coordinates
 
         Returns:
         dict with clicked info and url_after, or {"error": "..."}.
@@ -468,15 +534,23 @@ class BrowserManager:
             logging.info(f"Typing into selector: {selector} with content: {content}")
 
             try:
-                el = await self.active_page.query_selector(selector)
-                if el:
-                    await el.scroll_into_view_if_needed()
-                    await el.focus()
-                    await el.fill("")
-                    await el.type(content)
+                loc = await self._resolve_locator(selector, require_enabled=True, require_editable=True)
+                if loc:
+                    # Non blocking scroll to element
+                    await self._scroll_into_view(loc, selector)
+                    await loc.focus()
+                    await loc.fill("")
+                    await loc.type(content)
                     await self._wait_for_load_state()
-                if not el:
-                    return {"status": "error", "message": f"No element found for selector: {selector}"}
+                if not loc:
+                    try:
+                        n = await self.active_page.locator(selector).count()
+                    except Exception:
+                        n = 0
+                    if n == 0:
+                        return {"status": "error", "message": f"No element found for selector: {selector}"}
+        
+                    return {"status": "error", "message": f"No interactive element found for selector: {selector}, ({n} node(s) matched but none were interactable)"}
             except Exception as e:
                 logging.warning(f"Selector query failed: {selector}, error: {e}")
                 return {"status": "error", "message": f"Selector query failed: {e}"}
@@ -533,17 +607,24 @@ class BrowserManager:
         if not selector:
             return {"status": "error", "message": "selector required"}
         try:
-            el = await self.active_page.query_selector(selector)
+            loc = await self._resolve_locator(selector, require_enabled=False, require_editable=False)
         except Exception as e:
             logging.warning(f"Selector query failed: {selector}, error: {e}")
             return {"status": "error", "message": f"Selector query failed: {e}"}
 
-        if not el:
+        if not loc:
+            try:
+                n = await self.active_page.locator(selector).count()
+            except Exception:
+                n = 0
+            if n == 0:
+                return {"status": "error", "message" : f"No element for selector: {selector}"}
+            
             return {
                 "status": "error",
-                "message": f"No element for selector: {selector}",
+                "message": f"No visible element for selector: {selector}, ({n} node(s) matched but none were visible)",
             }
-        await el.scroll_into_view_if_needed()
+        await self._scroll_into_view(loc, selector)
         return {"status": "success"}
 
     async def scroll_to_text(self, text: str) -> Dict[str, Any]:
@@ -601,8 +682,8 @@ class BrowserManager:
         Multi-mode scroll tool.
 
         Modes:
-        - step: scroll in small steps with overlap to avoid skipping content.
-                Uses direction + steps + overlap.
+        - step: scroll in small steps.
+                Uses direction + steps.
         - percent: jump to a percentage of the document (0..100). Uses percent.
         - y: jump to absolute Y position in pixels. Uses y.
         - to_text: find first element containing `text` (case-insensitive) and scroll it into view.
@@ -693,7 +774,7 @@ class BrowserManager:
 
             try:
                 def is_modifier(k: str) -> bool:
-                    return k in {"Control", "Shift", "Alt"}
+                    return k in {"Control", "Shift", "Alt", "Meta", "Command", "Win"}
 
                 if len(keys) == 1:
                     await self.active_page.keyboard.press(keys[0])
