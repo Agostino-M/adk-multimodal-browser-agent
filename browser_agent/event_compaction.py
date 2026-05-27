@@ -28,7 +28,8 @@ model = LiteLlm(
     api_base=API_BASE,
     api_key=API_KEY,
     model=MODEL_NAME,
-    chat_template_kwargs={"enable_thinking": False},
+    extra_body={"enable_thinking": False},
+    num_retries=3,
 )
 
 EVENT_COMPACTION_WINDOW = 4

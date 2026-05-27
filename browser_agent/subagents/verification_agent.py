@@ -32,6 +32,7 @@ verification_agent = LlmAgent(
         api_key=API_KEY,
         model=MODEL_NAME,
         chat_template_kwargs={"enable_thinking": False},
+        num_retries=3,
     ),
     instruction=verification_prompt,
     tools=[update_current_subtask],

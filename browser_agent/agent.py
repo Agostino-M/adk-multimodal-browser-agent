@@ -10,7 +10,9 @@ from google.adk.models.lite_llm import LiteLlm
 from google.adk.tools import AgentTool
 from google.adk.apps.app import App, EventsCompactionConfig
 from google.adk.plugins.multimodal_tool_results_plugin import MultimodalToolResultsPlugin
+from google.adk.plugins.reflect_retry_tool_plugin import ReflectAndRetryToolPlugin, TrackingScope
 
+from browser_agent.event_compaction import event_compaction
 from browser_agent.subagents.execution_agent import execution_agent
 from browser_agent.subagents.verification_agent import verification_agent
 from browser_agent.callbacks import validate_planner_tools
@@ -65,20 +67,30 @@ root_agent = LlmAgent(
         api_key=API_KEY,
         model=MODEL_NAME,
         chat_template_kwargs={"enable_thinking": False},
+        num_retries=3,
     ),
     instruction=planner_prompt,
     tools=planner_tools,
     include_contents="none",
     #before_model_callback=lambda callback_context, llm_request: logging.info(f"Before planner orchestrator model call: {llm_request}"),
     before_tool_callback=validate_planner_tools,
+    after_model_callback=event_compaction,
+
+)
+
+retry_plugin = ReflectAndRetryToolPlugin(
+    max_retries=2,
+    tracking_scope=TrackingScope.GLOBAL,
+    throw_exception_if_retry_exceeded=False,
 )
 
 app = App(
     name="browser_agent",
     root_agent=root_agent,
-    events_compaction_config=EventsCompactionConfig(
-        compaction_interval=3,  # Trigger compaction every 3 new invocations.
-        overlap_size=1          # Include last invocation from the previous window.
-    ),
-    plugins=[MultimodalToolResultsPlugin()],
+    #events_compaction_config=EventsCompactionConfig(
+    #   compaction_interval=3,  # Trigger compaction every 3 new invocations.
+    #   overlap_size=1          # Include last invocation from the previous window.
+    #),
+    #plugins=[MultimodalToolResultsPlugin()],
+    plugins=[MultimodalToolResultsPlugin(), retry_plugin],
 )
