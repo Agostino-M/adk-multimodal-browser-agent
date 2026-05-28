@@ -29,6 +29,9 @@ browser = BrowserManager(show_browser=os.getenv("SHOW_BROWSER", "true").lower() 
 browser_tools = [
     browser.click,
     browser.type,
+    browser.select_option,
+    browser.hover,
+    browser.extract_content,
     browser.scroll,
     browser.goto_url,
     browser.get_state,

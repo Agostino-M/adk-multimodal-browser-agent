@@ -22,6 +22,9 @@ PLANNER_TOOL_NAMES = [
 BROWSER_TOOL_NAMES = [
     "click",
     "type",
+    "select_option",
+    "hover",
+    "extract_content",
     "scroll",
     "goto_url",
     "get_state",

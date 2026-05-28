@@ -145,13 +145,13 @@ def remove_subtask(tool_context: ToolContext, task_id: str):
     _save_state(tool_context, state)
     return state
 
-def complete_session(tool_context: ToolContext, final_result: str, performed_actions: str):
+def complete_session(tool_context: ToolContext, final_answer: str, performed_actions: str):
     """
     Mark the session as completed by setting the final answer and a summary of performed actions in the state. This should be called when the agent has achieved the goal and has no more subtasks to perform.
     """
     state = _load_state(tool_context)
 
-    state.final_answer = final_result
+    state.final_answer = final_answer
     state.summary_of_actions = performed_actions
     state.current_subtask_id = None
 

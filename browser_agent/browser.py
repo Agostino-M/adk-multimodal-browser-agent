@@ -33,6 +33,18 @@ class BrowserManager:
         if self._started:
             return
 
+        # Clean up any stale resources from a previous crashed session to avoid leaks.
+        for obj, method in [(self.context, "close"), (self.driver, "close"), (self.playwright, "stop")]:
+            if obj is not None:
+                try:
+                    await getattr(obj, method)()
+                except Exception:
+                    pass
+        self.context = None
+        self.driver = None
+        self.playwright = None
+        self.active_page = None
+
         self.playwright = await async_playwright().start()
         self.driver = await self.playwright.chromium.launch(headless=not self.show_browser)
 
@@ -57,17 +69,27 @@ class BrowserManager:
         self._started = True
 
     async def _ensure_started(self):
-        """Lazy init: start browser on first tool call."""
-        if not self._started:
+        """Lazy init: start browser on first tool call. Also recovers from unexpected disconnections."""
+        is_dead = self._started and (self.driver is None or not self.driver.is_connected())
+        if not self._started or is_dead:
             async with self._browser_lock:
-                if not self._started: # Double check locking
+                is_dead = self._started and (self.driver is None or not self.driver.is_connected())
+                if not self._started or is_dead:
+                    if is_dead:
+                        logging.warning("Browser disconnected unexpectedly, re-initializing...")
+                        self._started = False
+                        self.active_page = None
+                        self.context = None
+                        self.driver = None
                     await self.init()
 
     async def _wait_for_load_state(self):
         """Waits for the page to be idle after an action."""
+        if self.active_page is None:
+            return
         try:
             await self.active_page.wait_for_load_state("networkidle", timeout=5000)
-        except:
+        except Exception:
             pass
 
     async def _handle_new_page(self, page):
@@ -188,7 +210,7 @@ class BrowserManager:
                 const tag = el.tagName.toLowerCase();
                 if (!text && !["input", "textarea", "select"].includes(tag)) return null; // filter out non-interactive elements without text
 
-                let result = `-${tag}: ${text}`;
+                let result = `-${tag}: text=${text}`;
                 
                 const attrs = [];
                 if (el.id) attrs.push(`id=${el.id}`);
@@ -198,7 +220,7 @@ class BrowserManager:
                 if (ariaAttr) attrs.push(`aria=${ariaAttr}`);
                 
                 if (attrs.length > 0) {
-                    result += ` (${attrs.join(', ')})`;
+                    result += `, ${attrs.join(', ')}`;
                 }
 
                 return result;                
@@ -235,16 +257,145 @@ class BrowserManager:
         logging.info(f"DOM retrieval for query: \"{query}\" returned {len(results)} results in {c3 - c2:.2f} seconds")
         return results
 
+    async def _detect_captcha(self) -> Optional[str]:
+        """
+        Checks the current page for CAPTCHA or anti-bot challenges.
+        Returns a short label if detected, None otherwise.
+        Uses URL, page title, and a small set of known DOM selectors.
+        """
+        try:
+            url = self.active_page.url.lower()
+            title = (await self.active_page.title()).lower()
+
+            if "challenges.cloudflare.com" in url or "/cdn-cgi/challenge-platform" in url:
+                return "Cloudflare challenge page"
+            if "captcha" in url:
+                return "CAPTCHA detected in URL"
+
+            captcha_titles = [
+                ("just a moment", "Cloudflare 'Just a moment' challenge"),
+                ("verify you are human", "human-verification page"),
+                ("robot or human", "robot-check page"),
+                ("security check", "security-check page"),
+                ("are you a robot", "robot-check page"),
+                ("ddos protection", "DDoS-protection page"),
+                ("robot check", "robot-check page"),
+                ("please enable javascript", "JS-challenge page"),
+            ]
+            for keyword, label in captcha_titles:
+                if keyword in title:
+                    return label
+
+            # Selectors that are always blocking when present
+            blocking_selectors = [
+                ("#challenge-form", "Cloudflare challenge form"),
+                ("#challenge-running", "Cloudflare challenge running"),
+                ("[data-hcaptcha-widget-id]", "hCaptcha widget"),
+                ("input[name='captcha']", "CAPTCHA input field"),
+            ]
+            for selector, label in blocking_selectors:
+                try:
+                    if await self.active_page.query_selector(selector):
+                        return label
+                except Exception:
+                    continue
+
+            # reCAPTCHA and hCaptcha iframes can be invisible background widgets on normal pages.
+            # Only flag them if the element is actually visible (bounding box with meaningful size).
+            visible_selectors = [
+                ("iframe[src*='hcaptcha']", "hCaptcha"),
+                ("div.g-recaptcha", "Google reCAPTCHA widget"),
+            ]
+            for selector, label in visible_selectors:
+                try:
+                    el = await self.active_page.query_selector(selector)
+                    if el:
+                        box = await el.bounding_box()
+                        if box and box["width"] > 100 and box["height"] > 50:
+                            return label
+                except Exception:
+                    continue
+
+            return None
+        except Exception:
+            return None
+
+    async def _take_screenshot_with_size_limit(self, full_page: bool, metrics: Dict[str, Any]):
+        """
+        Takes a screenshot and ensures it stays within size limits by clipping height if needed.
+
+        full_page=True: captures a larger region starting from the current scroll position,
+        useful when the agent needs to inspect visual content. Clips downward from scrollY.
+        full_page=False: captures only the current viewport.
+        """
+        if full_page:
+            max_bytes = 400000  # 400KB for full-page mode
+            scroll_y = int(metrics.get("scrollY", 0))
+            viewport_w = int(metrics.get("viewportW", 1024))
+            viewport_h = int(metrics["viewportH"])
+            # Remaining page height from current scroll position
+            remaining_h = max(int(metrics["docH"]) - scroll_y, viewport_h)
+
+            # Empiric: ~750px per 100KB at quality=55
+            safe_height = int((max_bytes / 100000) * 750)
+            safe_height = min(safe_height, remaining_h)
+            safe_height = max(safe_height, viewport_h)
+
+            logging.info(
+                f"Full screenshot: scrollY={scroll_y}, docH={metrics['docH']}, "
+                f"remaining={remaining_h}, target_height={safe_height}px"
+            )
+
+            height_steps = [safe_height, int(safe_height * 0.8), int(safe_height * 0.6), viewport_h]
+
+            for clip_height in height_steps:
+                if clip_height < viewport_h:
+                    continue
+                try:
+                    screenshot_path = "screenshot_full.jpg"
+                    clip_region = {"x": 0, "y": scroll_y, "width": viewport_w, "height": clip_height}
+                    await self.active_page.screenshot(
+                        path=screenshot_path, full_page=True, type="jpeg", quality=55, clip=clip_region
+                    )
+                    async with aiofiles.open(screenshot_path, "rb") as f:
+                        image_bytes = await f.read()
+                    file_size = len(image_bytes)
+                    if file_size <= max_bytes:
+                        logging.info(f"Full screenshot: scrollY={scroll_y}, height={clip_height}px, size={file_size} bytes")
+                        return screenshot_path, image_bytes, "full"
+                    logging.info(f"Full screenshot: height={clip_height}px, size={file_size} bytes (exceeds limit, retrying)")
+                except Exception as e:
+                    logging.error(f"Error taking full screenshot at height {clip_height}: {e}")
+                    continue
+
+            logging.warning("Full screenshot exceeded size limit. Falling back to viewport.")
+            return await self._take_screenshot_with_size_limit(full_page=False, metrics=metrics)
+
+        else:
+            # Viewport screenshot
+            try:
+                screenshot_path = "screenshot_viewport.jpg"
+                logging.info(f"Taking viewport screenshot (viewportH={metrics['viewportH']}px)")
+                await self.active_page.screenshot(path=screenshot_path, full_page=False, type="jpeg", quality=40)
+                async with aiofiles.open(screenshot_path, "rb") as f:
+                    image_bytes = await f.read()
+                logging.info(f"Viewport screenshot: size={len(image_bytes)} bytes")
+                return screenshot_path, image_bytes, "viewport"
+            except Exception as e:
+                logging.error(f"Error taking viewport screenshot: {e}")
+                return None, None, "viewport"
+
     async def get_state(self, query: str = "", with_screenshot: bool = True, full_page_screenshot: bool = False) -> List[types.Part]:
         """
         Returns the full observable state of the browser.
-        ``query`` is an optional string that can be used to filter the DOM elements using the RAG tool before returning the state.
-        ``with_screenshot`` controls whether to include a screenshot of the current page in the returned state.
-        ``full_page_screenshot`` controls whether to take a full page screenshot or only a viewport screenshot.
+        ``query`` is an optional string used to filter DOM elements by relevance.
+        ``with_screenshot`` controls whether to include a screenshot.
+        ``full_page_screenshot`` when True captures a larger region starting from the current
+        scroll position (useful for inspecting visual content). When False captures the viewport only.
 
         Includes:
         - Current page URL
-        - Screenshot of the visible viewport (only if with_screenshot=True)
+        - Screenshot of the visible viewport or enlarged region anchored at current scroll position
         - Structured list of interactive DOM elements from the current page, optionally filtered by relevance to the query.
         """
         await self._ensure_started()
@@ -252,6 +403,8 @@ class BrowserManager:
         async with self._page_lock:
             try:
                 await self._wait_for_load_state()
+
+                captcha_label = await self._detect_captcha()
 
                 #dom = await self._extract_interactive_elements(40) old version without rag
                 dom = await self._retrieve_relevant_elements(query=query, k=30)  # new version with RAG filtering
@@ -261,7 +414,7 @@ class BrowserManager:
                 metrics = await self._get_scroll_metrics()
 
                 # Calculate the visible percentage of the page
-                visible_percentage = (metrics["viewportH"] / metrics["docH"]) * 100
+                visible_percentage = (metrics["viewportH"] / max(metrics["docH"], 1)) * 100
                 scroll_position = metrics["scrollY"]
 
                 # Build page overview for all open tabs/pages
@@ -277,6 +430,9 @@ class BrowserManager:
 
                 # Compact custom format to save tokens
                 lines = [f"url: {self.active_page.url}"]
+                if captcha_label:
+                    logging.warning(f"CAPTCHA detected: {captcha_label}")
+                    lines.insert(0, f"CAPTCHA_DETECTED: {captcha_label} — this page requires human verification. Stop interacting with this page and report the blocker to the planner.")
                 lines.append(f"visible_percentage: {visible_percentage:.2f}% of the page visible in the viewport.")
                 lines.append(f"scroll_position: {scroll_position:.2f} pixels down the page.")
                 lines.extend(page_lines)
@@ -293,23 +449,21 @@ class BrowserManager:
                     types.Part.from_text(text=compact_text),
                 ]
 
-                # Screenshot part
+                # Screenshot part - with size control
                 if with_screenshot:
-                    if full_page_screenshot:
-                        # Take a full-page screenshot
-                        await self.active_page.screenshot(path="screenshot_full.jpg", full_page=True, type="jpeg", quality=60)
-                        screenshot_path = "screenshot_full.jpg"
+                    image_bytes = None
+                    screenshot_type = "viewport"
+
+                    _, image_bytes, screenshot_type = await self._take_screenshot_with_size_limit(
+                        full_page=full_page_screenshot,
+                        metrics=metrics
+                    )
+                    
+                    if image_bytes:
+                        logging.info(f"Screenshot taken ({screenshot_type}): {len(image_bytes)} bytes")
+                        state.append(types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"))
                     else:
-                        # Take only the visible viewport screenshot
-                        await self.active_page.screenshot(path="screenshot_viewport.jpg", full_page=False, type="jpeg", quality=60)
-                        screenshot_path = "screenshot_viewport.jpg"
-
-                    # Read the image file as bytes
-                    async with aiofiles.open(screenshot_path, "rb") as f:
-                        image_bytes = await f.read()
-
-                    # Append the screenshot to the state
-                    state.append(types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"))
+                        logging.warning("Screenshot creation failed or exceeded size limits")
 
             except Exception as e:
                 logging.error(f"Error in get_state: {e}")
@@ -565,6 +719,7 @@ class BrowserManager:
             () => {
                 const scrollY = window.scrollY || window.pageYOffset;
                 const viewportH = window.innerHeight;
+                const viewportW = window.innerWidth;
                 const docH = Math.max(
                     document.body.scrollHeight,
                     document.documentElement.scrollHeight,
@@ -576,6 +731,7 @@ class BrowserManager:
                 return {
                     scrollY,
                     viewportH,
+                    viewportW,
                     docH,
                     atBottom: scrollY + viewportH >= docH - 2  // small tolerance
                 };
@@ -774,7 +930,7 @@ class BrowserManager:
 
             try:
                 def is_modifier(k: str) -> bool:
-                    return k in {"Control", "Shift", "Alt", "Meta", "Command", "Win"}
+                    return k in {"Control", "Shift", "Alt", "Meta", "Command"}
 
                 if len(keys) == 1:
                     await self.active_page.keyboard.press(keys[0])
@@ -792,6 +948,149 @@ class BrowserManager:
                 return {"status": "success", "pressed_keys": keys, "url_after": self.active_page.url}
             except Exception as e:
                 return {"status": "error", "message": f"Keyboard press failed: {str(e)}", "pressed_keys": keys}
+
+    async def select_option(
+        self,
+        selector: str,
+        value: Optional[str] = None,
+        label: Optional[str] = None,
+        index: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """
+        Selects an option inside a native <select> dropdown element.
+        Use this tool instead of 'type' when the target is a <select> — 'type'/'fill' do not work on native dropdowns.
+
+        selector: CSS selector targeting the <select> element.
+        Provide exactly one of:
+          - value: the option's HTML value attribute (e.g. value="IT")
+          - label: the option's visible text as shown in the dropdown (e.g. "Italy")
+          - index: 0-based position of the option in the list
+
+        Internally calls Playwright's select_option(), which dispatches the change event
+        so the page reacts exactly as if the user had picked the option manually.
+        """
+        await self._ensure_started()
+        async with self._page_lock:
+            if not any([value is not None, label is not None, index is not None]):
+                return {"status": "error", "message": "Provide at least one of: value, label, or index"}
+            try:
+                loc = await self._resolve_locator(selector, require_enabled=True, require_editable=False)
+                if not loc:
+                    try:
+                        n = await self.active_page.locator(selector).count()
+                    except Exception:
+                        n = 0
+                    if n == 0:
+                        return {"status": "error", "message": f"No element found for selector: {selector}"}
+                    return {"status": "error", "message": f"No visible/enabled element for selector: {selector}"}
+
+                if value is not None:
+                    selected = await loc.select_option(value=value)
+                elif label is not None:
+                    selected = await loc.select_option(label=label)
+                else:
+                    selected = await loc.select_option(index=index)
+
+                await self._wait_for_load_state()
+                return {"status": "success", "selector": selector, "selected_values": selected}
+            except Exception as e:
+                return {"status": "error", "message": f"select_option failed: {str(e)}"}
+
+    async def hover(
+        self,
+        mode: Literal["selector", "coordinates"],
+        selector: Optional[str] = None,
+        coordinates: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Moves the mouse over an element to trigger hover-based UI effects such as dropdown menus,
+        tooltips, or any content that only appears on mouseenter/mouseover.
+        Call this before clicking when the target element is only visible after a hover.
+
+        mode="selector": hover over the element matching the CSS selector.
+        mode="coordinates": hover at the given viewport coordinates "<point>x y</point>".
+
+        Internally uses Playwright's locator.hover() (which also scrolls the element into view)
+        or page.mouse.move() for coordinate-based hovering. Waits 500ms after the hover
+        to let hover-triggered animations or menus render before the next action.
+        """
+        await self._ensure_started()
+        async with self._page_lock:
+            try:
+                if mode == "selector":
+                    if not selector:
+                        return {"status": "error", "message": "mode='selector' requires: selector"}
+                    loc = await self._resolve_locator(selector, require_enabled=False, require_editable=False)
+                    if not loc:
+                        return {"status": "error", "message": f"No visible element for selector: {selector}"}
+                    await loc.hover()
+
+                elif mode == "coordinates":
+                    if not coordinates:
+                        return {"status": "error", "message": "mode='coordinates' requires: coordinates"}
+                    x, y = self._parse_point(coordinates)
+                    await self.active_page.mouse.move(x, y)
+
+                else:
+                    return {"status": "error", "message": f"Unknown mode: {mode}"}
+
+                # Wait for hover-triggered UI (menus, tooltips) to appear
+                await self.active_page.wait_for_timeout(500)
+                return {"status": "success", "mode": mode}
+            except Exception as e:
+                return {"status": "error", "message": f"hover failed: {str(e)}"}
+
+    async def extract_content(
+        self,
+        selector: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Extracts visible text content from the current page without relying on the screenshot.
+        Use this when the task requires reading non-interactive content such as prices, search results,
+        error messages, article text, or table data — elements that do not appear in the interactive DOM
+        returned by get_state.
+
+        selector: optional CSS selector to narrow extraction to a specific area of the page
+                  (e.g. 'table', '.price', '#search-results', 'article').
+                  If omitted, returns the full visible body text.
+
+        When a selector is provided, uses Playwright's locator API so that extended selectors
+        like :has-text(), :visible, and other Playwright pseudo-classes are supported alongside
+        standard CSS. Falls back to document.body.innerText for full-page extraction.
+        Output is truncated to 5000 chars to avoid excessive token usage.
+        """
+        await self._ensure_started()
+        async with self._page_lock:
+            try:
+                if selector:
+                    # Use Playwright's locator so extended selectors like :has-text() work.
+                    # querySelectorAll only understands standard CSS and would throw on them.
+                    loc = self.active_page.locator(selector)
+                    count = await loc.count()
+                    if count == 0:
+                        return {"status": "error", "message": f"No content found for selector: {selector}"}
+                    parts = []
+                    for i in range(count):
+                        try:
+                            t = await loc.nth(i).inner_text()
+                            if t.strip():
+                                parts.append(t.strip())
+                        except Exception:
+                            pass
+                    text = "\n---\n".join(parts)
+                    if not text:
+                        return {"status": "error", "message": f"No content found for selector: {selector}"}
+                else:
+                    text = await self.active_page.evaluate(
+                        "() => (document.body.innerText || '').trim()"
+                    )
+
+                if len(text) > 5000:
+                    text = text[:5000] + "\n...[truncated]"
+
+                return {"status": "success", "content": text, "url": self.active_page.url}
+            except Exception as e:
+                return {"status": "error", "message": f"extract_content failed: {str(e)}"}
 
     async def close(self):
         """Closes the browser and cleans up resources."""
