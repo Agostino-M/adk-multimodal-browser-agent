@@ -28,7 +28,7 @@ model = LiteLlm(
     api_base=API_BASE,
     api_key=API_KEY,
     model=MODEL_NAME,
-    extra_body={"enable_thinking": False},
+    chat_template_kwargs={"enable_thinking": False},
     num_retries=3,
 )
 

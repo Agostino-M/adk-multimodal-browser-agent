@@ -6,7 +6,7 @@ from google.adk.agents import LlmAgent
 from google.adk.models.lite_llm import LiteLlm
 
 from browser_agent.prompt import verification_prompt
-from ..callbacks import inject_current_task
+from ..callbacks import inject_current_task, validate_verification_tools
 from browser_agent.state import update_current_subtask
 
 
@@ -38,4 +38,5 @@ verification_agent = LlmAgent(
     tools=[update_current_subtask],
     include_contents="none",
     before_model_callback=inject_current_task,
+    before_tool_callback=validate_verification_tools,
 )

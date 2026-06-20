@@ -217,7 +217,7 @@ class BrowserManager:
                 const nameAttr = el.getAttribute("name");
                 if (nameAttr) attrs.push(`name=${nameAttr}`);
                 const ariaAttr = el.getAttribute("aria-label");
-                if (ariaAttr) attrs.push(`aria=${ariaAttr}`);
+                if (ariaAttr && ariaAttr != text) attrs.push(`aria=${ariaAttr}`);
                 
                 if (attrs.length > 0) {
                     result += `, ${attrs.join(', ')}`;

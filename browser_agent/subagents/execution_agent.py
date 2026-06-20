@@ -7,7 +7,7 @@ from google.adk.models.lite_llm import LiteLlm
 
 from browser_agent.event_compaction import event_compaction
 from browser_agent.prompt import web_execution_prompt
-from browser_agent.callbacks import handle_agent_retry, stop_agent_after_max_iterations, validate_execution_tools
+from browser_agent.callbacks import handle_agent_retry, inject_current_task, stop_agent_after_max_iterations, validate_execution_tools
 from browser_agent.browser import BrowserManager
 
 ENV_PATH = Path(__file__).parent.resolve().with_name(".env")
@@ -54,7 +54,7 @@ execution_agent = LlmAgent(
     output_key="execution_output",
     tools=browser_tools,
     include_contents="none",
-    before_model_callback=[handle_agent_retry],
+    before_model_callback=[inject_current_task ,handle_agent_retry],
     before_tool_callback=validate_execution_tools,
     after_model_callback=[event_compaction, stop_agent_after_max_iterations],
 )

@@ -180,6 +180,15 @@ def validate_planner_tools(tool: BaseTool, args: Dict[str, Any], tool_context: T
     return None
 
 
+def validate_verification_tools(tool: BaseTool, args: Dict[str, Any], tool_context: ToolContext):
+    """Before-tool callback for the verification agent: logs invocations and validates tool name."""
+    tool_name = tool.name
+    logging.info(f"Invoked tool: {tool_name} with args: {args}")
+    if tool_name != "update_current_subtask":
+        return f"Tool '{tool_name}' does not exist. Available tools: ['update_current_subtask']"
+    return None
+
+
 def validate_execution_tools(tool: BaseTool, args: Dict[str, Any], tool_context: ToolContext):
     """
     Before tool callback to enforce constraints for the execution agent, ensuring it only uses browser tools and follows execution rules.
