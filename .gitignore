@@ -211,3 +211,9 @@ __marimo__/
 .adk/
 videos/
 .DS_Store
+*.json*
+
+# Datasets — not redistributed (sources like GAIA have restrictive licenses).
+# Rebuild locally following optimization/README.md (Dataset section).
+optimization/dataset_unified.csv
+optimization/dataset_unified.csv.bak
