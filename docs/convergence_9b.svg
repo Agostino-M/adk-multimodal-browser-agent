@@ -1,0 +1,54 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="680" height="420" font-family="Segoe UI,Arial,sans-serif">
+<rect width="680" height="420" fill="white"/>
+<line x1="70" y1="370.0" x2="500" y2="370.0" stroke="#e5e5e5"/>
+<text x="62" y="374.0" font-size="11" fill="#333" text-anchor="end">0.30</text>
+<line x1="70" y1="302.0" x2="500" y2="302.0" stroke="#e5e5e5"/>
+<text x="62" y="306.0" font-size="11" fill="#333" text-anchor="end">0.40</text>
+<line x1="70" y1="234.0" x2="500" y2="234.0" stroke="#e5e5e5"/>
+<text x="62" y="238.0" font-size="11" fill="#333" text-anchor="end">0.50</text>
+<line x1="70" y1="166.0" x2="500" y2="166.0" stroke="#e5e5e5"/>
+<text x="62" y="170.0" font-size="11" fill="#333" text-anchor="end">0.60</text>
+<line x1="70" y1="98.0" x2="500" y2="98.0" stroke="#e5e5e5"/>
+<text x="62" y="102.0" font-size="11" fill="#333" text-anchor="end">0.70</text>
+<line x1="70" y1="30.0" x2="500" y2="30.0" stroke="#e5e5e5"/>
+<text x="62" y="34.0" font-size="11" fill="#333" text-anchor="end">0.80</text>
+<line x1="70.0" y1="370" x2="70.0" y2="374" stroke="#333"/>
+<text x="70.0" y="388" font-size="11" fill="#333" text-anchor="middle">1</text>
+<line x1="123.8" y1="370" x2="123.8" y2="374" stroke="#333"/>
+<text x="123.8" y="388" font-size="11" fill="#333" text-anchor="middle">2</text>
+<line x1="177.5" y1="370" x2="177.5" y2="374" stroke="#333"/>
+<text x="177.5" y="388" font-size="11" fill="#333" text-anchor="middle">3</text>
+<line x1="231.2" y1="370" x2="231.2" y2="374" stroke="#333"/>
+<text x="231.2" y="388" font-size="11" fill="#333" text-anchor="middle">4</text>
+<line x1="285.0" y1="370" x2="285.0" y2="374" stroke="#333"/>
+<text x="285.0" y="388" font-size="11" fill="#333" text-anchor="middle">5</text>
+<line x1="338.8" y1="370" x2="338.8" y2="374" stroke="#333"/>
+<text x="338.8" y="388" font-size="11" fill="#333" text-anchor="middle">6</text>
+<line x1="392.5" y1="370" x2="392.5" y2="374" stroke="#333"/>
+<text x="392.5" y="388" font-size="11" fill="#333" text-anchor="middle">7</text>
+<line x1="446.2" y1="370" x2="446.2" y2="374" stroke="#333"/>
+<text x="446.2" y="388" font-size="11" fill="#333" text-anchor="middle">8</text>
+<line x1="500.0" y1="370" x2="500.0" y2="374" stroke="#333"/>
+<text x="500.0" y="388" font-size="11" fill="#333" text-anchor="middle">9</text>
+<line x1="70" y1="30" x2="70" y2="370" stroke="#333"/>
+<line x1="70" y1="370" x2="500" y2="370" stroke="#333"/>
+<text x="285" y="412" font-size="12" fill="#000" text-anchor="middle">Round (1 = initial single-shot run)</text>
+<text x="18" y="200" font-size="12" fill="#000" text-anchor="middle" transform="rotate(-90 18 200)">Task Success Rate</text>
+<path d="M70.0,344.3 L123.8,325.9 L177.5,252.4 L231.2,224.8 L285.0,206.5 L338.8,188.0 L392.5,169.7 L446.2,133.0 L500.0,133.0" fill="none" stroke="#555555" stroke-width="2"/>
+<circle cx="70.0" cy="344.3" r="3" fill="#555555"/><circle cx="123.8" cy="325.9" r="3" fill="#555555"/><circle cx="177.5" cy="252.4" r="3" fill="#555555"/><circle cx="231.2" cy="224.8" r="3" fill="#555555"/><circle cx="285.0" cy="206.5" r="3" fill="#555555"/><circle cx="338.8" cy="188.0" r="3" fill="#555555"/><circle cx="392.5" cy="169.7" r="3" fill="#555555"/><circle cx="446.2" cy="133.0" r="3" fill="#555555"/><circle cx="500.0" cy="133.0" r="3" fill="#555555"/>
+<path d="M70.0,316.7 L123.8,289.1 L177.5,243.2 L231.2,169.7 L285.0,133.0 L338.8,123.7 L392.5,123.7" fill="none" stroke="#1f6feb" stroke-width="2"/>
+<circle cx="70.0" cy="316.7" r="3" fill="#1f6feb"/><circle cx="123.8" cy="289.1" r="3" fill="#1f6feb"/><circle cx="177.5" cy="243.2" r="3" fill="#1f6feb"/><circle cx="231.2" cy="169.7" r="3" fill="#1f6feb"/><circle cx="285.0" cy="133.0" r="3" fill="#1f6feb"/><circle cx="338.8" cy="123.7" r="3" fill="#1f6feb"/><circle cx="392.5" cy="123.7" r="3" fill="#1f6feb"/>
+<path d="M70.0,243.2 L123.8,160.5 L177.5,123.7 L231.2,87.0 L285.0,68.6 L338.8,59.4 L392.5,59.4 L446.2,59.4" fill="none" stroke="#2ea043" stroke-width="2"/>
+<circle cx="70.0" cy="243.2" r="3" fill="#2ea043"/><circle cx="123.8" cy="160.5" r="3" fill="#2ea043"/><circle cx="177.5" cy="123.7" r="3" fill="#2ea043"/><circle cx="231.2" cy="87.0" r="3" fill="#2ea043"/><circle cx="285.0" cy="68.6" r="3" fill="#2ea043"/><circle cx="338.8" cy="59.4" r="3" fill="#2ea043"/><circle cx="392.5" cy="59.4" r="3" fill="#2ea043"/><circle cx="446.2" cy="59.4" r="3" fill="#2ea043"/>
+<line x1="520" y1="40" x2="542" y2="40" stroke="#555555" stroke-width="2"/>
+<circle cx="531" cy="40" r="3" fill="#555555"/>
+<text x="548" y="44" font-size="11" fill="#333">9B + seed</text>
+<line x1="520" y1="62" x2="542" y2="62" stroke="#1f6feb" stroke-width="2"/>
+<circle cx="531" cy="62" r="3" fill="#1f6feb"/>
+<text x="548" y="66" font-size="11" fill="#333">9B + GEPA-35B</text>
+<line x1="520" y1="84" x2="542" y2="84" stroke="#2ea043" stroke-width="2"/>
+<circle cx="531" cy="84" r="3" fill="#2ea043"/>
+<text x="548" y="88" font-size="11" fill="#333">9B + GEPA-9B</text>
+<text x="520" y="116" font-size="10" fill="#777">plateau: Δ=0 for</text>
+<text x="520" y="130" font-size="10" fill="#777">2 consecutive rounds</text>
+</svg>

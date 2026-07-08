@@ -23,6 +23,8 @@ Key findings:
 - **In-domain GEPA outperforms cross-deployment**: GEPA-9B (optimized on 9B) reaches 0.757, vs 0.662 for GEPA-35B cross-deployed to 9B (+9.5 pp).
 - **Single-shot advantage**: 9B+GEPA-9B starts at 0.487 (vs 0.378 cross and 0.338 seed), suggesting the optimized prompt improves even zero-retry performance.
 
+Full per-category breakdown, the 9B convergence chart, and reproduction notes are in [`docs/RESULTS.md`](docs/RESULTS.md).
+
 ---
 
 ## Architecture
@@ -62,7 +64,7 @@ The Planner maintains a `SessionState` (goal → subtask queue → current subta
 
 ## GEPA Prompt Optimization
 
-Planner prompts are optimized with [GEPA](https://github.com/zou-group/gepa) (Gradient-free Evolution of Prompt Agents), which reflects on model failures on a mini-batch and proposes improved candidates.
+Planner prompts are optimized with [GEPA](https://github.com/gepa-ai/gepa) ([paper](https://arxiv.org/abs/2507.19457)), a reflective prompt optimizer that runs the agent on a training set, lets a *reflection LM* analyze failures, mutates the prompt, and keeps the best candidate against a validation set.
 
 Two optimization campaigns were run:
 
@@ -85,6 +87,8 @@ python gepa_optimization.py \
 ```
 
 Best prompts are saved to `optimization/best_prompts/`. To activate a candidate, copy its content into `browser_agent/prompt.py` → `planner_prompt`.
+
+See [`optimization/README.md`](optimization/README.md) for the full pipeline: reflection/judge LM configuration, resume from a saved state, session chaining, and the dataset schema.
 
 ---
 
@@ -237,7 +241,11 @@ To reproduce the retry campaigns reported above, disable already-passing tasks i
 
 ## Observability
 
-The agent integrates with [Langfuse](https://langfuse.com/) for distributed trace logging across the three-agent pipeline. Add to `.env`:
+During development, the ADK dev UI (`adk web`) exposes the live `SessionState` and the event stream (tool calls, model responses) for the root agent:
+
+![ADK dev UI showing the live SessionState and the Planner's tool-call event stream](docs/dev_ui.png)
+
+For production tracing, the agent integrates with [Langfuse](https://langfuse.com/) for distributed trace logging across the three-agent pipeline (the dev UI only shows the root agent; the Executor–Verifier pipeline appears as a single aggregated tool call). Add to `.env`:
 
 ```env
 LANGFUSE_PUBLIC_KEY=pk-...

@@ -217,3 +217,5 @@ videos/
 # Rebuild locally following optimization/README.md (Dataset section).
 optimization/dataset_unified.csv
 optimization/dataset_unified.csv.bak
+evaluation/data/dataset_unified.csv
+evaluation/data/dataset_unified.csv.bak
