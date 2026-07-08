@@ -74,6 +74,11 @@ def _llm_score_chatcompletion(input_task: str, prediction: str, ground_truth: st
     sanitized_prediction = sanitize_text(prediction)
     sanitized_ground_truth = sanitize_text(ground_truth)
 
+    if not sanitized_ground_truth:
+        return TaskEvaluation("", 0.0, "No ground truth provided", prediction, ground_truth)
+    if sanitized_prediction.startswith("TIMEOUT: task exceeded "):
+        return TaskEvaluation("", 0.0, "Task timed out without a valid prediction", prediction, ground_truth)
+
     prompt = (
         "Evaluate if the PREDICTION correctly answers the INPUT TASK by comparing it with the GROUND TRUTH.\n\n"
         "SCORING RULES — read carefully before scoring:\n\n"
@@ -103,6 +108,7 @@ def _llm_score_chatcompletion(input_task: str, prediction: str, ground_truth: st
             {"role": "user", "content": prompt},
         ],
         "temperature": 0.1,  # Low temperature for consistent scoring
+        "chat_template_kwargs": {"enable_thinking": False},  # Disable reasoning: faster, avoids timeouts and <think> blocks breaking JSON parsing
     }
 
     for attempt in range(max_retries):

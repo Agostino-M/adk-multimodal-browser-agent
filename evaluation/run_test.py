@@ -16,13 +16,25 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 if "--headless" in sys.argv:
     os.environ["SHOW_BROWSER"] = "false"
 
+# Resolve agent module before any agent import so env vars are set first.
+_agent_name = None
+for i, arg in enumerate(sys.argv):
+    if arg == "--agent" and i + 1 < len(sys.argv):
+        _agent_name = sys.argv[i + 1]
+        break
+_agent_name = _agent_name or "browser_agent"
+
+if _agent_name == "browser_agent_react":
+    from browser_agent_react.agent import app
+    from browser_agent_react.subagents.execution_agent import browser as _global_browser
+else:
+    from browser_agent.agent import app
+    from browser_agent.subagents.execution_agent import browser as _global_browser
+
 from google.genai import types
 from google.adk.events import Event
 from google.adk import Runner
 from google.adk.sessions import InMemorySessionService
-from browser_agent.agent import root_agent, app
-
-from browser_agent.browser import BrowserManager
 
 #logging.basicConfig(level=logging.DEBUG)
 
@@ -115,9 +127,9 @@ async def collect_final_response(events_iterator: AsyncIterator[Event]) -> str:
     return last_text
 
 
-async def run_tasks_and_save_results(runner: Runner, session_service: InMemorySessionService, csv_file: str, result_file: str, web_names: list, n_test: int, task_timeout: int, user_id="user_test"):
+async def run_tasks_and_save_results(runner: Runner, session_service: InMemorySessionService, csv_file: str, result_file: str, web_names: list, n_test: int, task_timeout: int, task_browser, user_id="user_test"):
     """Main function for executing all tasks"""
-    from browser_agent.subagents.execution_agent import browser as _task_browser
+    _task_browser = task_browser
 
     logging.info(f"Reading csv")
     tasks = read_tasks_from_csv(csv_file)
@@ -138,8 +150,8 @@ async def run_tasks_and_save_results(runner: Runner, session_service: InMemorySe
             # Create session
             # session = delete_session(session_id)
             # session = create_session(session_id)
-            await session_service.delete_session(app_name="browser_agent", session_id=session_id, user_id="user_test")
-            await session_service.create_session(app_name="browser_agent", session_id=session_id, user_id="user_test")
+            await session_service.delete_session(app_name=app.name, session_id=session_id, user_id="user_test")
+            await session_service.create_session(app_name=app.name, session_id=session_id, user_id="user_test")
 
             # Invoke agent for task
             # events = await invoke_agent(runner, task_id, session_id, task_input)
@@ -167,6 +179,13 @@ async def run_tasks_and_save_results(runner: Runner, session_service: InMemorySe
                     "content": f"TIMEOUT: task exceeded {task_timeout}s.",
                     "duration_min": round((time.time() - task_start) / 60, 2),
                 }
+            except Exception as e:
+                logging.error(f"Task {task_id} raised {type(e).__name__}: {e!r} — marking as failed, continuing batch.")
+                result = {
+                    "task_id": task_id,
+                    "content": f"ERROR: {type(e).__name__}: {str(e)[:500]}",
+                    "duration_min": round((time.time() - task_start) / 60, 2),
+                }
             finally:
                 try:
                     await _task_browser.close()
@@ -182,6 +201,7 @@ async def run_tasks_and_save_results(runner: Runner, session_service: InMemorySe
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Simple runner for browser-agent test.")
+    parser.add_argument("--agent", default="browser_agent", choices=["browser_agent", "browser_agent_react"], help="Agent module to use.")
     parser.add_argument("--csv_file", default="./data/dataset_unified.csv", help="Path to tasks dataset file.")
     parser.add_argument("--output", default="results.jsonl", help="Path to save test results JSON file.")
     parser.add_argument("--web_names", type=str, default=None, help="Comma-separated names of the web to test, e.g. 'CUSTOM,GAIA'.")
@@ -204,11 +224,10 @@ async def main():
         session_service=InMemorySessionService(),
     )
 
-    from browser_agent.subagents.execution_agent import browser as _browser
     try:
-        await run_tasks_and_save_results(runner, runner.session_service, csv_file, result_file, web_names, n_test, task_timeout)
+        await run_tasks_and_save_results(runner, runner.session_service, csv_file, result_file, web_names, n_test, task_timeout, task_browser=_global_browser)
     finally:
-        await _browser.close()
+        await _global_browser.close()
 
 
 if __name__ == "__main__":
